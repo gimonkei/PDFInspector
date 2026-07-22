@@ -1,10 +1,14 @@
 from PySide6.QtWidgets import (
-    QLabel,
-    QScrollArea
+    QGraphicsScene,
+    QGraphicsPixmapItem
 )
 
+from PySide6.QtGui import QPixmap
+from app.viewer.graphics_view import GraphicsView
 
-class PDFView(QScrollArea):
+
+
+class PDFView(GraphicsView):
 
 
     def __init__(self):
@@ -12,28 +16,43 @@ class PDFView(QScrollArea):
         super().__init__()
 
 
-        self.label = QLabel()
+        self.scene = QGraphicsScene()
 
-        self.label.setScaledContents(
-            True
+
+        self.setScene(
+            self.scene
         )
 
 
-        self.setWidget(
-            self.label
-        )
+        self.pixmap_item = None
 
-
-        self.setWidgetResizable(
-            True
-        )
 
 
     def show_pixmap(
         self,
-        pixmap
+        pixmap: QPixmap
     ):
 
-        self.label.setPixmap(
+
+        self.scene.clear()
+
+
+        self.pixmap_item = QGraphicsPixmapItem(
             pixmap
         )
+
+
+        self.scene.addItem(
+            self.pixmap_item
+        )
+
+
+        self.scene.setSceneRect(
+            pixmap.rect()
+        )
+
+
+        self.resetTransform()
+
+
+        self.zoom_factor = 1.0
