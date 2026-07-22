@@ -1,19 +1,25 @@
 import sys
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication
+
+from app.ui.main_window import MainWindow
+
 
 
 def main():
+
     app = QApplication(sys.argv)
 
-    window = QLabel(
-        "PDFInspector 起動確認"
-    )
 
-    window.resize(400, 200)
+    window = MainWindow()
+
     window.show()
 
-    sys.exit(app.exec())
+
+    sys.exit(
+        app.exec()
+    )
+
 
 
 if __name__ == "__main__":
