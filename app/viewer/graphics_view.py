@@ -1,22 +1,32 @@
 from PySide6.QtWidgets import QGraphicsView
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QWheelEvent, QMouseEvent
 
 
 class GraphicsView(QGraphicsView):
+
 
     def __init__(self):
 
         super().__init__()
 
 
-        # ズーム倍率
         self.zoom_factor = 1.0
 
 
-        # ドラッグ移動用
-        self.dragging = False
-        self.last_mouse_pos = None
+        self._dragging = False
+
+        self._last_mouse_pos = QPoint()
+
+
+
+        self.setTransformationAnchor(
+            QGraphicsView.AnchorUnderMouse
+        )
+
+        self.setResizeAnchor(
+            QGraphicsView.AnchorUnderMouse
+        )
 
 
         self.setDragMode(
@@ -24,71 +34,51 @@ class GraphicsView(QGraphicsView):
         )
 
 
-        # アンチエイリアス
-        self.setRenderHints(
-            self.renderHints()
+        self.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
         )
 
 
-    def wheelEvent(
-        self,
-        event: QWheelEvent
-    ):
-
-        # Ctrl押下時のみズーム
-        if event.modifiers() & Qt.ControlModifier:
-
-            delta = event.angleDelta().y()
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
+        )
 
 
-            if delta > 0:
-                factor = 1.15
 
-            else:
-                factor = 0.85
-
-
-            self.zoom_factor *= factor
-
-
-            self.scale(
-                factor,
-                factor
-            )
-
-
-            event.accept()
-
-        else:
-
-            # 通常スクロール
-            super().wheelEvent(
-                event
-            )
-
+    # -------------------------
+    # マウスドラッグ
+    # -------------------------
 
     def mousePressEvent(
         self,
         event: QMouseEvent
     ):
 
-        if event.button() == Qt.MiddleButton:
 
-            self.dragging = True
+        if event.button() == Qt.LeftButton:
 
-            self.last_mouse_pos = event.position()
+            self._dragging = True
+
+            self._last_mouse_pos = (
+                event.position()
+                .toPoint()
+            )
+
 
             self.setCursor(
                 Qt.ClosedHandCursor
             )
 
+
             event.accept()
 
-        else:
+            return
 
-            super().mousePressEvent(
-                event
-            )
+
+        super().mousePressEvent(
+            event
+        )
+
 
 
     def mouseMoveEvent(
@@ -96,39 +86,49 @@ class GraphicsView(QGraphicsView):
         event: QMouseEvent
     ):
 
-        if self.dragging:
 
-            delta = (
+        if self._dragging:
+
+
+            current = (
                 event.position()
-                -
-                self.last_mouse_pos
+                .toPoint()
             )
 
 
-            self.last_mouse_pos = event.position()
+            delta = (
+                current
+                -
+                self._last_mouse_pos
+            )
 
 
             self.horizontalScrollBar().setValue(
                 self.horizontalScrollBar().value()
                 -
-                int(delta.x())
+                delta.x()
             )
 
 
             self.verticalScrollBar().setValue(
                 self.verticalScrollBar().value()
                 -
-                int(delta.y())
+                delta.y()
             )
+
+
+            self._last_mouse_pos = current
 
 
             event.accept()
 
-        else:
+            return
 
-            super().mouseMoveEvent(
-                event
-            )
+
+        super().mouseMoveEvent(
+            event
+        )
+
 
 
     def mouseReleaseEvent(
@@ -136,18 +136,127 @@ class GraphicsView(QGraphicsView):
         event: QMouseEvent
     ):
 
-        if event.button() == Qt.MiddleButton:
 
-            self.dragging = False
+        if event.button() == Qt.LeftButton:
+
+
+            self._dragging = False
+
 
             self.setCursor(
                 Qt.ArrowCursor
             )
 
+
             event.accept()
 
-        else:
+            return
 
-            super().mouseReleaseEvent(
-                event
+
+        super().mouseReleaseEvent(
+            event
+        )
+
+
+
+    # -------------------------
+    # ホイール操作
+    # -------------------------
+
+    def wheelEvent(
+        self,
+        event: QWheelEvent
+    ):
+
+
+        delta = event.angleDelta().y()
+
+
+        # Ctrl + ホイール = ズーム
+
+        if (
+            event.modifiers()
+            &
+            Qt.ControlModifier
+        ):
+
+
+            if delta > 0:
+
+                factor = 1.15
+
+            else:
+
+                factor = 0.85
+
+
+
+            new_zoom = (
+                self.zoom_factor
+                *
+                factor
             )
+
+
+            if 0.1 <= new_zoom <= 8.0:
+
+
+                self.scale(
+                    factor,
+                    factor
+                )
+
+
+                self.zoom_factor = new_zoom
+
+
+            event.accept()
+
+            return
+
+
+
+        # Shift + ホイール = 横移動
+
+        if (
+            event.modifiers()
+            &
+            Qt.ShiftModifier
+        ):
+
+
+            value = (
+                self.horizontalScrollBar()
+                .value()
+            )
+
+
+            self.horizontalScrollBar().setValue(
+                value
+                -
+                delta
+            )
+
+
+            event.accept()
+
+            return
+
+
+
+        # 通常ホイール = 縦移動
+
+        value = (
+            self.verticalScrollBar()
+            .value()
+        )
+
+
+        self.verticalScrollBar().setValue(
+            value
+            -
+            delta
+        )
+
+
+        event.accept()

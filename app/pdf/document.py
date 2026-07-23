@@ -13,23 +13,57 @@ class PDFDocument:
         self.doc = fitz.open(path)
 
 
-    def get_page(self, index):
+    def close(self):
 
-        if self.doc is None:
-            return None
+        if self.doc:
 
-        return self.doc[index]
+            self.doc.close()
 
-
-    @property
-    def page_count(self):
-
-        if self.doc is None:
-            return 0
-
-        return len(self.doc)
+        self.doc = None
 
 
     def has_document(self):
 
         return self.doc is not None
+
+
+    @property
+    def page_count(self):
+
+        if not self.doc:
+
+            return 0
+
+        return len(self.doc)
+
+
+    def get_page(self, index):
+
+        if not self.doc:
+
+            return None
+
+
+        if index < 0 or index >= len(self.doc):
+
+            return None
+
+
+        return self.doc[index]
+
+
+    def get_all_pages(self):
+
+        """
+        全ページ取得
+        """
+
+        if not self.doc:
+
+            return []
+
+
+        return [
+            self.doc[i]
+            for i in range(len(self.doc))
+        ]
