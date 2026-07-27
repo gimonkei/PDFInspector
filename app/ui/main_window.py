@@ -2,10 +2,14 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QFileDialog,
     QToolBar,
-    QLabel
+    QLabel,
+    QWidget,
+    QSizePolicy
 )
 
 from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
 
 from app.viewer.pdf_view import PDFView
 from app.pdf.document import PDFDocument
@@ -63,14 +67,18 @@ class MainWindow(QMainWindow):
 
         toolbar = QToolBar()
 
-        self.addToolBar(
-            toolbar
+        self.addToolBar(toolbar)
+
+    #
+    # 開く
+    #
+        open_action = QAction(
+            "📂 開く",
+            self
         )
 
-
-        open_action = QAction(
-            "PDFを開く",
-            self
+        open_action.setToolTip(
+            "PDFを開く"
         )
 
         open_action.triggered.connect(
@@ -81,13 +89,58 @@ class MainWindow(QMainWindow):
             open_action
         )
 
+        toolbar.addSeparator()
+
+    #
+    # 回転
+    #
+        rotate_left_action = QAction(
+            "↺",
+            self
+        )
+
+        rotate_left_action.setToolTip(
+            "クリック：現在ページを左90°回転\nShift+クリック：全ページを左90°回転"
+        )
+
+        rotate_left_action.triggered.connect(
+            self.rotate_left
+        )
+
+        toolbar.addAction(
+            rotate_left_action
+        )
+
+        rotate_right_action = QAction(
+            "↻",
+            self
+        )
+
+        rotate_right_action.triggered.connect(
+            self.rotate_right
+        )
+
+        rotate_right_action.setToolTip(
+            "クリック：現在ページを右90°回転\nShift+クリック：全ページを右90°回転"
+        )
+
+
+        toolbar.addAction(
+            rotate_right_action
+        )
 
         toolbar.addSeparator()
 
-
+    #
+    # ページ送り
+    #
         self.prev_action = QAction(
             "◀",
             self
+        )
+
+        self.prev_action.setToolTip(
+           "前のページ"
         )
 
         self.prev_action.triggered.connect(
@@ -98,10 +151,13 @@ class MainWindow(QMainWindow):
             self.prev_action
         )
 
-
         self.next_action = QAction(
             "▶",
             self
+        )
+
+        self.next_action.setToolTip(
+            "次のページ"
         )
 
         self.next_action.triggered.connect(
@@ -112,9 +168,7 @@ class MainWindow(QMainWindow):
             self.next_action
         )
 
-
         toolbar.addSeparator()
-
 
         self.page_label = QLabel(
             "0 / 0"
@@ -124,6 +178,64 @@ class MainWindow(QMainWindow):
             self.page_label
         )
 
+    #
+    # ここで右側へ寄せる
+    #
+        spacer = QWidget()
+
+        spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred
+        )
+
+        toolbar.addWidget(
+            spacer
+        )
+
+    #
+    # 保存
+    #
+        save_action = QAction(
+            "💾 保存",
+            self
+        )
+
+        save_action.setToolTip(
+            "保存 (Ctrl+S)"
+        )
+
+        save_action.setShortcut(
+            "Ctrl+S"
+        )
+
+        save_action.triggered.connect(
+            self.save_pdf
+        )
+
+        toolbar.addAction(
+            save_action
+        )
+
+        save_as_action = QAction(
+            "💾 名前を付けて保存",
+            self
+        )
+
+        save_as_action.setToolTip(
+            "名前を付けて保存 (Ctrl+Shift+S)"
+        )
+
+        save_as_action.setShortcut(
+            "Ctrl+Shift+S"
+        )
+
+        save_as_action.triggered.connect(
+            self.save_as_pdf
+        )
+
+        toolbar.addAction(
+            save_as_action
+        )
 
         self.update_toolbar()
 
@@ -216,14 +328,18 @@ class MainWindow(QMainWindow):
 
         pixmaps = self.render_all_pages()
 
-
         self.view.show_pages(
             pixmaps
         )
 
+    #
+    # 現在ページへ戻す
+    #
+        self.view.scroll_to_page(
+            self.current_page
+        )
 
         self.update_toolbar()
-
 
 
     def open_pdf(self):
@@ -308,6 +424,85 @@ class MainWindow(QMainWindow):
        
     def update_current_page(self, page):
 
+        if page == self.current_page:
+            return
+
         self.current_page = page
 
         self.update_toolbar()
+
+    def save_pdf(self):
+
+        if not self.document.has_document():
+            return
+
+        self.document.save()
+
+
+    def save_as_pdf(self):
+
+        if not self.document.has_document():
+            return
+
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "名前を付けて保存",
+            "",
+            "PDF (*.pdf)"
+        )
+
+        if not path:
+          return
+
+        self.document.save_as(
+           path
+        )
+
+    def rotate_left(self):
+
+        if not self.document.has_document():
+            return
+
+        modifiers = QApplication.keyboardModifiers()
+
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+
+            self.document.rotate_all_pages(
+                -90
+            )
+
+        else:
+
+            self.document.rotate_page(
+                self.current_page,
+                -90
+            )
+
+        self.cache.clear()
+
+        self.show_document()
+
+    def rotate_right(self):
+
+        if not self.document.has_document():
+            return
+
+        modifiers = QApplication.keyboardModifiers()
+
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+
+            self.document.rotate_all_pages(
+                90
+            )
+
+        else:
+
+            self.document.rotate_page(
+                self.current_page,
+                90  
+            )
+
+        self.cache.clear()
+
+        self.show_document()

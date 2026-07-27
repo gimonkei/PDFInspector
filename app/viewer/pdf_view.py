@@ -7,7 +7,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Signal
 
 from app.viewer.graphics_view import GraphicsView
-
+from app.viewer.page_manager import PageManager
 
 
 class PDFView(GraphicsView):
@@ -29,11 +29,7 @@ class PDFView(GraphicsView):
             self.scene
         )
 
-
-        self.page_items = []
-
-        self.page_positions = []
-
+        self.page_manager = PageManager()
 
         self.verticalScrollBar().valueChanged.connect(
             self.on_scroll
@@ -45,9 +41,7 @@ class PDFView(GraphicsView):
 
         self.scene.clear()
 
-        self.page_items.clear()
-
-        self.page_positions.clear()
+        self.page_manager.clear()
 
 
 
@@ -75,22 +69,15 @@ class PDFView(GraphicsView):
         )
 
 
-        self.page_items.append(
-            item
-        )
-
-
         rect = item.sceneBoundingRect()
 
-
-        self.page_positions.append(
-            {
-                "page": page_index,
-                "top": rect.top(),
-                "bottom": rect.bottom()
-            }
+        self.page_manager.add_page(
+            page_index,
+            pixmap,
+            item,
+            rect.top(),
+            rect.bottom()
         )
-
 
 
     def show_pages(
@@ -98,17 +85,21 @@ class PDFView(GraphicsView):
         pages
     ):
 
+    #
+    # 現在のズーム倍率を保存
+    #
+        current_zoom = self.zoom_factor
 
+    #
+    # ページを作り直す
+    #
         self.clear_pages()
-
 
         y = 0
 
         margin = 20
 
-
         for index, pixmap in enumerate(pages):
-
 
             self.add_page(
                 pixmap,
@@ -116,22 +107,25 @@ class PDFView(GraphicsView):
                 y
             )
 
-
             y += pixmap.height()
 
             y += margin
-
-
 
         self.scene.setSceneRect(
             self.scene.itemsBoundingRect()
         )
 
-
+    #
+    # ズームを復元
+    #
         self.resetTransform()
 
-        self.zoom_factor = 1.0
+        self.scale(
+            current_zoom,
+            current_zoom
+        )
 
+        self.zoom_factor = current_zoom
 
 
     def scroll_to_page(
@@ -139,60 +133,32 @@ class PDFView(GraphicsView):
         page_index
     ):
 
-
-        if page_index < 0:
-
-            return
-
-
-        if page_index >= len(
-            self.page_items
-        ):
-
-            return
-
-
-
-        item = self.page_items[
+        page = self.page_manager.get(
             page_index
-        ]
+        )
 
+        if page is None:
+            return
 
-        self.ensureVisible(
-            item,
-            0,
-            0
+        self.verticalScrollBar().setValue(
+            int(page.top)
         )
 
 
 
     def get_visible_page(self):
 
-
-        scene_point = self.mapToScene(
-            self.viewport().rect().center()
+        point = self.mapToScene(
+            self.viewport().rect().topLeft()
         )
 
+        y = point.y() + (
+            self.viewport().height() * 0.2
+        )
 
-        y = scene_point.y()
-
-
-        for page in self.page_positions:
-
-
-            if (
-                page["top"]
-                <=
-                y
-                <=
-                page["bottom"]
-            ):
-
-                return page["page"]
-
-
-        return 0
-
+        return self.page_manager.visible_page(
+            y
+        )
 
 
     def on_scroll(self):
