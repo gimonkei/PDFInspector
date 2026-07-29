@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pdf.document import PDFDocument, PDFOpenError, PDFSaveError
-from app.pdf.page_cache import PageCache
+from app.pdf.render_manager import RenderManager
 from app.pdf.renderer import PDFRenderer
 from app.viewer.pdf_view import PDFView
 
@@ -26,13 +26,18 @@ class MainWindow(QMainWindow):
 
         self.document = PDFDocument()
         self.renderer = PDFRenderer()
-        self.cache = PageCache()
+        self.render_manager = RenderManager(self.renderer)
         self.current_page = 0
 
         self.view = PDFView()
         self.view.page_changed.connect(self.update_current_page)
-        self.view.zoom_changed.connect(self.update_zoom_display)
+        self.view.zoom_changed.connect(self.on_zoom_changed)
         self.setCentralWidget(self.view)
+
+        self.render_timer = QTimer(self)
+        self.render_timer.setSingleShot(True)
+        self.render_timer.setInterval(180)
+        self.render_timer.timeout.connect(self.rerender_for_current_zoom)
 
         self.create_toolbar()
 
@@ -82,12 +87,14 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.zoom_combo)
 
         fit_width_action = QAction("幅に合わせる", self)
-        fit_width_action.setToolTip(
-            "PDFを表示領域の幅に合わせる (Ctrl+2)"
-        )
+        fit_width_action.setToolTip("PDFを表示領域の幅に合わせる (Ctrl+2)")
         fit_width_action.setShortcut("Ctrl+2")
         fit_width_action.triggered.connect(self.fit_to_width)
         toolbar.addAction(fit_width_action)
+
+        self.render_scale_label = QLabel(" 描画: 2.00x / DL ")
+        self.render_scale_label.setToolTip("現在のPDF内部レンダリング倍率")
+        toolbar.addWidget(self.render_scale_label)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -120,23 +127,35 @@ class MainWindow(QMainWindow):
             f"{self.current_page + 1} / {self.document.page_count}" if has_pdf else "0 / 0"
         )
 
-    def render_all_pages(self):
-        pixmaps = []
-        for index in range(self.document.page_count):
-            cached = self.cache.get(index)
-            if cached:
-                pixmaps.append(cached)
-                continue
-            page = self.document.get_page(index)
-            pixmap = self.renderer.render_page(page)
-            self.cache.set(index, pixmap)
-            pixmaps.append(pixmap)
-        return pixmaps
+    def _device_pixel_ratio(self):
+        return max(float(self.view.devicePixelRatioF()), 1.0)
+
+    def render_pages_for_zoom(self):
+        scale = self.render_manager.target_scale(
+            self.view.zoom_factor,
+            self._device_pixel_ratio(),
+        )
+        self.render_scale_label.setText(f" 描画: {scale:.2f}x / DL ")
+        return self.render_manager.render_document(
+            self.document,
+            self.view.zoom_factor,
+            self._device_pixel_ratio(),
+        )
 
     def show_document(self):
-        self.view.show_pages(self.render_all_pages())
+        self.view.show_pages(self.render_pages_for_zoom())
         self.view.scroll_to_page(self.current_page)
         self.update_toolbar()
+
+    def rerender_for_current_zoom(self):
+        if not self.document.has_document():
+            return
+        self.view.refresh_pages(self.render_pages_for_zoom())
+
+    def on_zoom_changed(self, zoom_factor):
+        self.update_zoom_display(zoom_factor)
+        if self.document.has_document():
+            self.render_timer.start()
 
     def open_pdf(self):
         path, _ = QFileDialog.getOpenFileName(self, "PDF選択", "", "PDF (*.pdf)")
@@ -144,7 +163,8 @@ class MainWindow(QMainWindow):
             return
         try:
             self.document.open(path)
-            self.cache.clear()
+            self.render_manager.clear()
+            self.render_manager.prepare_document(self.document)
             self.current_page = 0
             self.show_document()
             self.view.fit_to_width()
@@ -195,7 +215,6 @@ class MainWindow(QMainWindow):
     def fit_to_width(self):
         if not self.document.has_document():
             return
-
         if not self.view.fit_to_width():
             QMessageBox.information(
                 self,
@@ -231,7 +250,7 @@ class MainWindow(QMainWindow):
             self.document.rotate_all_pages(-90)
         else:
             self.document.rotate_page(self.current_page, -90)
-        self.cache.clear()
+        self.render_manager.clear()
         self.show_document()
         self.view.fit_to_width()
 
@@ -242,7 +261,7 @@ class MainWindow(QMainWindow):
             self.document.rotate_all_pages(90)
         else:
             self.document.rotate_page(self.current_page, 90)
-        self.cache.clear()
+        self.render_manager.clear()
         self.show_document()
         self.view.fit_to_width()
 
@@ -253,7 +272,9 @@ class MainWindow(QMainWindow):
             self.view.set_continuous_mode()
         if self.document.has_document():
             self.view.scroll_to_page(self.current_page)
+            self.render_timer.start()
 
     def closeEvent(self, event):
+        self.render_timer.stop()
         self.document.close()
         event.accept()
