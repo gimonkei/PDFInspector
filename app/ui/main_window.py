@@ -4,15 +4,21 @@ from PySide6.QtWidgets import (
     QToolBar,
     QLabel,
     QWidget,
-    QSizePolicy
+    QSizePolicy,
+    QApplication,
+    QComboBox,
+    QMessageBox
 )
 
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 
 from app.viewer.pdf_view import PDFView
-from app.pdf.document import PDFDocument
+from app.pdf.document import (
+    PDFDocument,
+    PDFOpenError,
+    PDFSaveError
+)
 from app.pdf.renderer import PDFRenderer
 from app.pdf.page_cache import PageCache
 
@@ -237,6 +243,24 @@ class MainWindow(QMainWindow):
             save_as_action
         )
 
+        self.view_mode = QComboBox()
+
+        self.view_mode.addItems(
+            [
+                "1ページ表示",
+                "連続表示"
+            ]
+        )
+
+        self.view_mode.currentIndexChanged.connect(
+            self.change_view_mode
+        )
+
+        toolbar.addWidget(
+            self.view_mode
+        )
+
+
         self.update_toolbar()
 
 
@@ -358,18 +382,17 @@ class MainWindow(QMainWindow):
 
 
 
-        self.document.open(
-            path
-        )
-
-
-        self.cache.clear()
-
-
-        self.current_page = 0
-
-
-        self.show_document()
+        try:
+            self.document.open(path)
+            self.cache.clear()
+            self.current_page = 0
+            self.show_document()
+        except PDFOpenError as error:
+            QMessageBox.critical(
+                self,
+                "PDFを開けません",
+                str(error)
+            )
 
 
 
@@ -436,7 +459,14 @@ class MainWindow(QMainWindow):
         if not self.document.has_document():
             return
 
-        self.document.save()
+        try:
+            self.document.save()
+        except PDFSaveError as error:
+            QMessageBox.critical(
+                self,
+                "PDFを保存できません",
+                str(error)
+            )
 
 
     def save_as_pdf(self):
@@ -455,9 +485,17 @@ class MainWindow(QMainWindow):
         if not path:
           return
 
-        self.document.save_as(
-           path
-        )
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        try:
+            self.document.save_as(path)
+        except PDFSaveError as error:
+            QMessageBox.critical(
+                self,
+                "PDFを保存できません",
+                str(error)
+            )
 
     def rotate_left(self):
 
@@ -504,5 +542,24 @@ class MainWindow(QMainWindow):
             )
 
         self.cache.clear()
+
+        self.show_document()
+
+    def closeEvent(self, event):
+
+        self.document.close()
+        event.accept()
+
+
+    def change_view_mode(self,index):
+
+        if index == 0:
+
+            self.view.set_single_mode()
+
+        else:
+
+            self.view.set_continuous_mode()
+
 
         self.show_document()
