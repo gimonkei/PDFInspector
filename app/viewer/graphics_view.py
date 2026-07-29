@@ -1,262 +1,78 @@
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QGraphicsView
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QWheelEvent, QMouseEvent
 
 
 class GraphicsView(QGraphicsView):
+    zoom_changed = Signal(float)
 
+    MIN_ZOOM = 0.10
+    MAX_ZOOM = 8.00
 
     def __init__(self):
-
         super().__init__()
-
-
         self.zoom_factor = 1.0
-
-
         self._dragging = False
-
         self._last_mouse_pos = QPoint()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
+    def set_zoom(self, zoom_factor: float):
+        zoom_factor = max(self.MIN_ZOOM, min(float(zoom_factor), self.MAX_ZOOM))
+        self.resetTransform()
+        self.scale(zoom_factor, zoom_factor)
+        self.zoom_factor = zoom_factor
+        self.zoom_changed.emit(self.zoom_factor)
 
-
-        self.setTransformationAnchor(
-            QGraphicsView.AnchorUnderMouse
-        )
-
-        self.setResizeAnchor(
-            QGraphicsView.AnchorUnderMouse
-        )
-
-
-        self.setDragMode(
-            QGraphicsView.NoDrag
-        )
-
-
-        self.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-
-
-        self.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-
-
-
-    # -------------------------
-    # マウスドラッグ
-    # -------------------------
-
-    def mousePressEvent(
-        self,
-        event: QMouseEvent
-    ):
-
-
-        if event.button() == Qt.LeftButton:
-
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
-
-            self._last_mouse_pos = (
-                event.position()
-                .toPoint()
-            )
-
-
-            self.setCursor(
-                Qt.ClosedHandCursor
-            )
-
-
+            self._last_mouse_pos = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
-
             return
+        super().mousePressEvent(event)
 
-
-        super().mousePressEvent(
-            event
-        )
-
-
-
-    def mouseMoveEvent(
-        self,
-        event: QMouseEvent
-    ):
-
-
+    def mouseMoveEvent(self, event: QMouseEvent):
         if self._dragging:
-
-
-            current = (
-                event.position()
-                .toPoint()
-            )
-
-
-            delta = (
-                current
-                -
-                self._last_mouse_pos
-            )
-
-
-            self.horizontalScrollBar().setValue(
-                self.horizontalScrollBar().value()
-                -
-                delta.x()
-            )
-
-
-            self.verticalScrollBar().setValue(
-                self.verticalScrollBar().value()
-                -
-                delta.y()
-            )
-
-
+            current = event.position().toPoint()
+            delta = current - self._last_mouse_pos
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             self._last_mouse_pos = current
-
-
             event.accept()
-
             return
+        super().mouseMoveEvent(event)
 
-
-        super().mouseMoveEvent(
-            event
-        )
-
-
-
-    def mouseReleaseEvent(
-        self,
-        event: QMouseEvent
-    ):
-
-
-        if event.button() == Qt.LeftButton:
-
-
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
-
-
-            self.setCursor(
-                Qt.ArrowCursor
-            )
-
-
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
-
             return
+        super().mouseReleaseEvent(event)
 
-
-        super().mouseReleaseEvent(
-            event
-        )
-
-
-
-    # -------------------------
-    # ホイール操作
-    # -------------------------
-
-    def wheelEvent(
-        self,
-        event: QWheelEvent
-    ):
-
-
+    def wheelEvent(self, event: QWheelEvent):
         delta = event.angleDelta().y()
+        modifiers = event.modifiers()
 
-
-        # Ctrl + ホイール = ズーム
-
-        if (
-            event.modifiers()
-            &
-            Qt.ControlModifier
-        ):
-
-
-            if delta > 0:
-
-                factor = 1.15
-
-            else:
-
-                factor = 0.85
-
-
-
-            new_zoom = (
-                self.zoom_factor
-                *
-                factor
-            )
-
-
-            if 0.1 <= new_zoom <= 8.0:
-
-
-                self.scale(
-                    factor,
-                    factor
-                )
-
-
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            factor = 1.15 if delta > 0 else 0.85
+            new_zoom = self.zoom_factor * factor
+            if self.MIN_ZOOM <= new_zoom <= self.MAX_ZOOM:
+                self.scale(factor, factor)
                 self.zoom_factor = new_zoom
-
-
+                self.zoom_changed.emit(self.zoom_factor)
             event.accept()
-
             return
 
-
-
-        # Shift + ホイール = 横移動
-
-        if (
-            event.modifiers()
-            &
-            Qt.ShiftModifier
-        ):
-
-
-            value = (
-                self.horizontalScrollBar()
-                .value()
-            )
-
-
-            self.horizontalScrollBar().setValue(
-                value
-                -
-                delta
-            )
-
-
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta)
             event.accept()
-
             return
 
-
-
-        # 通常ホイール = 縦移動
-
-        value = (
-            self.verticalScrollBar()
-            .value()
-        )
-
-
-        self.verticalScrollBar().setValue(
-            value
-            -
-            delta
-        )
-
-
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta)
         event.accept()
