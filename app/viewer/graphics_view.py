@@ -27,6 +27,21 @@ class GraphicsView(QGraphicsView):
         self.zoom_factor = zoom_factor
         self.zoom_changed.emit(self.zoom_factor)
 
+    def fit_to_width(self, margin: int = 24) -> bool:
+        scene_rect = self.scene.itemsBoundingRect()
+
+        if scene_rect.isEmpty() or scene_rect.width() <= 0:
+            return False
+
+        available_width = self.viewport().width() - margin
+        if available_width <= 0:
+            return False
+
+        zoom_factor = available_width / scene_rect.width()
+        self.set_zoom(zoom_factor)
+        self.horizontalScrollBar().setValue(0)
+        return True
+
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True

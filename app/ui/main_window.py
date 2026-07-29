@@ -81,6 +81,14 @@ class MainWindow(QMainWindow):
         self.zoom_combo.lineEdit().editingFinished.connect(self.apply_typed_zoom)
         toolbar.addWidget(self.zoom_combo)
 
+        fit_width_action = QAction("幅に合わせる", self)
+        fit_width_action.setToolTip(
+            "PDFを表示領域の幅に合わせる (Ctrl+2)"
+        )
+        fit_width_action.setShortcut("Ctrl+2")
+        fit_width_action.triggered.connect(self.fit_to_width)
+        toolbar.addAction(fit_width_action)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -139,6 +147,7 @@ class MainWindow(QMainWindow):
             self.cache.clear()
             self.current_page = 0
             self.show_document()
+            self.view.fit_to_width()
         except PDFOpenError as error:
             QMessageBox.critical(self, "PDFを開けません", str(error))
 
@@ -183,6 +192,17 @@ class MainWindow(QMainWindow):
         self.zoom_combo.setCurrentText(f"{percent}%")
         self.zoom_combo.blockSignals(False)
 
+    def fit_to_width(self):
+        if not self.document.has_document():
+            return
+
+        if not self.view.fit_to_width():
+            QMessageBox.information(
+                self,
+                "幅に合わせる",
+                "表示できるPDFページがありません。",
+            )
+
     def save_pdf(self):
         if not self.document.has_document():
             return
@@ -213,6 +233,7 @@ class MainWindow(QMainWindow):
             self.document.rotate_page(self.current_page, -90)
         self.cache.clear()
         self.show_document()
+        self.view.fit_to_width()
 
     def rotate_right(self):
         if not self.document.has_document():
@@ -223,6 +244,7 @@ class MainWindow(QMainWindow):
             self.document.rotate_page(self.current_page, 90)
         self.cache.clear()
         self.show_document()
+        self.view.fit_to_width()
 
     def change_view_mode(self, index):
         if index == 0:
