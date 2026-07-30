@@ -1,5 +1,5 @@
 from PySide6.QtCore import QRectF, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QPen
+from PySide6.QtGui import QBrush, QColor, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsRectItem,
@@ -87,6 +87,7 @@ class PDFView(GraphicsView):
         self._schedule_visible_region_changed()
 
     def apply_rendered_pages(self, rendered_pages):
+        """Convert worker-produced QImages to QPixmaps on the GUI thread."""
         for rendered_page in rendered_pages:
             origin = self._page_origins.get(rendered_page.page_index)
             if origin is None:
@@ -104,7 +105,7 @@ class PDFView(GraphicsView):
             self._active_render_scale = rendered_page.render_scale
 
             for tile in rendered_page.tiles:
-                if tile.pixmap.isNull():
+                if tile.image.isNull():
                     continue
 
                 key = (
@@ -116,7 +117,11 @@ class PDFView(GraphicsView):
                 if key in self._tile_items:
                     continue
 
-                item = QGraphicsPixmapItem(tile.pixmap)
+                pixmap = QPixmap.fromImage(tile.image)
+                if pixmap.isNull():
+                    continue
+
+                item = QGraphicsPixmapItem(pixmap)
                 inverse_scale = (
                     1.0 / tile.render_scale
                     if tile.render_scale > 0
@@ -132,12 +137,6 @@ class PDFView(GraphicsView):
                 self._tile_items[key] = item
 
     def visible_page_regions(self) -> dict[int, QRectF]:
-        """
-        Return visible and near-visible page regions in page-local coordinates.
-
-        A viewport margin is included to pre-render a small area around the
-        screen, reducing blank flashes during normal scrolling.
-        """
         if not self._page_origins:
             return {}
 

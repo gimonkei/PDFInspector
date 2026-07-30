@@ -4,7 +4,7 @@ import math
 
 import fitz
 from PySide6.QtCore import QRectF
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage
 
 from app.pdf.renderer import PDFRenderer
 
@@ -21,7 +21,7 @@ class RenderedTile:
     page_index: int
     column: int
     row: int
-    pixmap: QPixmap
+    image: QImage
     render_scale: float
     scene_x: float
     scene_y: float
@@ -44,7 +44,6 @@ class RenderManager:
     SCALE_STEP = 0.25
     OVERSAMPLE = 1.35
 
-    # Rendered device-pixel size of one tile.
     TILE_PIXEL_SIZE = 768
     MAX_TILE_CACHE_ITEMS = 256
 
@@ -124,13 +123,6 @@ class RenderManager:
         zoom_factor: float,
         device_pixel_ratio: float = 1.0,
     ) -> list[RenderedPage]:
-        """
-        Render only tiles intersecting the requested page-local rectangles.
-
-        page_regions:
-            {page_index: QRectF(x, y, width, height)}
-            Coordinates are PDF page-local scene coordinates.
-        """
         render_scale = self.target_scale(
             zoom_factor,
             device_pixel_ratio,
@@ -196,10 +188,13 @@ class RenderManager:
         )
         last_column = max(
             0,
-            min(max_column, math.floor(
-                max(region.right() - 1e-7, region.left())
-                / tile_scene_size
-            )),
+            min(
+                max_column,
+                math.floor(
+                    max(region.right() - 1e-7, region.left())
+                    / tile_scene_size
+                ),
+            ),
         )
         first_row = max(
             0,
@@ -207,10 +202,13 @@ class RenderManager:
         )
         last_row = max(
             0,
-            min(max_row, math.floor(
-                max(region.bottom() - 1e-7, region.top())
-                / tile_scene_size
-            )),
+            min(
+                max_row,
+                math.floor(
+                    max(region.bottom() - 1e-7, region.top())
+                    / tile_scene_size
+                ),
+            ),
         )
 
         tiles = []
@@ -268,7 +266,7 @@ class RenderManager:
             self._tile_cache.move_to_end(key)
             return cached
 
-        pixmap, actual_scale = self.renderer.render_display_list_tile(
+        image, actual_scale = self.renderer.render_display_list_tile(
             display_data.display_list,
             display_data.page_rect,
             clip_rect,
@@ -281,7 +279,7 @@ class RenderManager:
             page_index=display_data.page_index,
             column=column,
             row=row,
-            pixmap=pixmap,
+            image=image,
             render_scale=actual_scale,
             scene_x=float(clip_rect.x0 - display_data.page_rect.x0),
             scene_y=float(clip_rect.y0 - display_data.page_rect.y0),

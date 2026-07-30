@@ -28,7 +28,16 @@ class MainWindow(QMainWindow):
         self.document = PDFDocument()
         self.renderer = PDFRenderer()
         self.render_manager = RenderManager(self.renderer)
-        self.render_pipeline = RenderPipeline(self.render_manager)
+        self.render_pipeline = RenderPipeline(self.render_manager, self)
+        self.render_pipeline.result_ready.connect(
+            self.on_render_result
+        )
+        self.render_pipeline.render_failed.connect(
+            self.on_render_failed
+        )
+        self.render_pipeline.busy_changed.connect(
+            self.on_render_busy_changed
+        )
         self.current_page = 0
 
         self.view = PDFView()
@@ -117,10 +126,10 @@ class MainWindow(QMainWindow):
         toolbar.addAction(fit_width_action)
 
         self.render_scale_label = QLabel(
-            " 描画: 2.00x / PIPELINE / 細線ON "
+            " 描画: 2.00x / ASYNC / 細線ON "
         )
         self.render_scale_label.setToolTip(
-            "描画要求をパイプライン経由で処理します"
+            "画面周辺をバックグラウンドでタイル描画します"
         )
         toolbar.addWidget(self.render_scale_label)
 
@@ -193,9 +202,10 @@ class MainWindow(QMainWindow):
             else "OFF"
         )
         cache_count = self.render_manager.tile_cache_count()
+        busy = "描画中" if self.render_pipeline.is_busy else "待機"
         self.render_scale_label.setText(
-            f" 描画: {scale:.2f}x / PIPELINE "
-            f"/ 細線{state} / cache {cache_count} "
+            f" 描画: {scale:.2f}x / ASYNC "
+            f"/ {busy} / 細線{state} / cache {cache_count} "
         )
 
     def show_document(self):
@@ -225,15 +235,30 @@ class MainWindow(QMainWindow):
             self.view.zoom_factor,
             self._device_pixel_ratio(),
         )
-        result = self.render_pipeline.execute(
+        self.render_pipeline.submit(
             self.document,
             request,
         )
+        self.update_render_label()
 
+    def on_render_result(self, result):
         if not self.render_pipeline.is_current(result.generation):
             return
-
         self.view.apply_rendered_pages(result.pages)
+        self.update_render_label()
+
+    def on_render_failed(self, generation, details):
+        if not self.render_pipeline.is_current(generation):
+            return
+        self.update_render_label()
+        QMessageBox.warning(
+            self,
+            "PDF描画エラー",
+            "PDFのバックグラウンド描画に失敗しました。\n\n"
+            + details,
+        )
+
+    def on_render_busy_changed(self, _busy):
         self.update_render_label()
 
     def rerender_for_current_zoom(self):
@@ -431,6 +456,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.render_timer.stop()
         self.visible_tile_timer.stop()
-        self.render_pipeline.invalidate()
+        self.render_pipeline.shutdown()
         self.document.close()
         event.accept()

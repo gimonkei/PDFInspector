@@ -1,5 +1,5 @@
 import fitz
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage
 
 from app.pdf.hairline_enhancer import HairlineEnhancer
 
@@ -20,7 +20,13 @@ class PDFRenderer:
         scale: float = 2.0,
         zoom_factor: float = 1.0,
         hairline_enabled: bool = True,
-    ) -> tuple[QPixmap, float]:
+    ) -> tuple[QImage, float]:
+        """
+        Render a tile as QImage.
+
+        QImage is safe to create in a worker thread. QPixmap conversion is
+        deliberately deferred to PDFView on the GUI thread.
+        """
         scale = self._limit_scale(clip_rect, scale)
 
         clip = fitz.Rect(
@@ -31,7 +37,7 @@ class PDFRenderer:
         )
 
         if clip.is_empty:
-            return QPixmap(), scale
+            return QImage(), scale
 
         pix = display_list.get_pixmap(
             matrix=fitz.Matrix(scale, scale),
@@ -52,8 +58,7 @@ class PDFRenderer:
                 image,
                 zoom_factor,
             )
-
-        return QPixmap.fromImage(image), scale
+        return image, scale
 
     def _limit_scale(self, clip_rect, requested_scale: float) -> float:
         scale = max(
