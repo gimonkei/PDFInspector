@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pdf.document import PDFDocument, PDFOpenError, PDFSaveError
+from app.pdf.render_pipeline import RenderPipeline
 from app.pdf.render_manager import RenderManager
 from app.pdf.renderer import PDFRenderer
 from app.viewer.pdf_view import PDFView
@@ -27,6 +28,7 @@ class MainWindow(QMainWindow):
         self.document = PDFDocument()
         self.renderer = PDFRenderer()
         self.render_manager = RenderManager(self.renderer)
+        self.render_pipeline = RenderPipeline(self.render_manager)
         self.current_page = 0
 
         self.view = PDFView()
@@ -115,10 +117,10 @@ class MainWindow(QMainWindow):
         toolbar.addAction(fit_width_action)
 
         self.render_scale_label = QLabel(
-            " 描画: 2.00x / VISIBLE TILE / 細線ON "
+            " 描画: 2.00x / PIPELINE / 細線ON "
         )
         self.render_scale_label.setToolTip(
-            "画面周辺だけをタイル描画します"
+            "描画要求をパイプライン経由で処理します"
         )
         toolbar.addWidget(self.render_scale_label)
 
@@ -192,7 +194,7 @@ class MainWindow(QMainWindow):
         )
         cache_count = self.render_manager.tile_cache_count()
         self.render_scale_label.setText(
-            f" 描画: {scale:.2f}x / VISIBLE TILE "
+            f" 描画: {scale:.2f}x / PIPELINE "
             f"/ 細線{state} / cache {cache_count} "
         )
 
@@ -218,18 +220,26 @@ class MainWindow(QMainWindow):
         if not page_regions:
             return
 
-        rendered_pages = self.render_manager.render_regions(
-            self.document,
+        request = self.render_pipeline.create_request(
             page_regions,
             self.view.zoom_factor,
             self._device_pixel_ratio(),
         )
-        self.view.apply_rendered_pages(rendered_pages)
+        result = self.render_pipeline.execute(
+            self.document,
+            request,
+        )
+
+        if not self.render_pipeline.is_current(result.generation):
+            return
+
+        self.view.apply_rendered_pages(result.pages)
         self.update_render_label()
 
     def rerender_for_current_zoom(self):
         if not self.document.has_document():
             return
+        self.render_pipeline.invalidate()
         self.view.clear_rendered_tiles()
         self.update_render_label()
         self.schedule_visible_tile_render()
@@ -241,6 +251,7 @@ class MainWindow(QMainWindow):
             self.render_timer.start()
 
     def toggle_hairline(self, enabled):
+        self.render_pipeline.invalidate()
         self.render_manager.set_hairline_enabled(enabled)
         if self.document.has_document():
             self.view.clear_rendered_tiles()
@@ -258,6 +269,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.document.open(path)
+            self.render_pipeline.invalidate()
             self.render_manager.clear()
             self.render_manager.prepare_document(self.document)
             self.current_page = 0
@@ -381,6 +393,7 @@ class MainWindow(QMainWindow):
                 self.current_page,
                 -90,
             )
+        self.render_pipeline.invalidate()
         self.render_manager.clear()
         self.render_manager.prepare_document(self.document)
         self.show_document()
@@ -399,6 +412,7 @@ class MainWindow(QMainWindow):
                 self.current_page,
                 90,
             )
+        self.render_pipeline.invalidate()
         self.render_manager.clear()
         self.render_manager.prepare_document(self.document)
         self.show_document()
@@ -410,11 +424,13 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_continuous_mode()
         if self.document.has_document():
+            self.render_pipeline.invalidate()
             self.view.scroll_to_page(self.current_page)
             self.schedule_visible_tile_render()
 
     def closeEvent(self, event):
         self.render_timer.stop()
         self.visible_tile_timer.stop()
+        self.render_pipeline.invalidate()
         self.document.close()
         event.accept()
