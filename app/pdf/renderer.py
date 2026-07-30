@@ -2,15 +2,19 @@ import fitz
 from PySide6.QtGui import QImage
 
 from app.pdf.hairline_enhancer import HairlineEnhancer
+from app.pdf.vector_hairline_overlay import VectorHairlineOverlay
 
 
 class PDFRenderer:
-    MIN_SCALE = 1.0
+    # MuPDF supports matrices below 1.0. Low zoom is deliberately rendered
+    # at near-native display resolution to avoid a second destructive shrink.
+    MIN_SCALE = 0.20
     MAX_SCALE = 8.0
     MAX_TILE_PIXELS = 4_000_000
 
     def __init__(self):
         self.hairline_enhancer = HairlineEnhancer()
+        self.vector_hairline_overlay = VectorHairlineOverlay()
 
     def render_display_list_tile(
         self,
@@ -20,6 +24,7 @@ class PDFRenderer:
         scale: float = 2.0,
         zoom_factor: float = 1.0,
         hairline_enabled: bool = True,
+        drawings=(),
     ) -> tuple[QImage, float]:
         """
         Render a tile as QImage.
@@ -57,6 +62,12 @@ class PDFRenderer:
             image = self.hairline_enhancer.apply(
                 image,
                 zoom_factor,
+            )
+            image = self.vector_hairline_overlay.apply(
+                image,
+                drawings,
+                clip,
+                scale,
             )
         return image, scale
 

@@ -14,6 +14,7 @@ class PageDisplayData:
     page_index: int
     display_list: object
     page_rect: object
+    drawings: tuple
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,15 @@ class RenderedPage:
 
 
 class RenderManager:
-    MIN_RENDER_SCALE = 2.0
+    # At low zoom, render close to the final device resolution instead of
+    # producing a 2x bitmap and shrinking it again in QGraphicsView. This keeps
+    # a recovered one-pixel CAD line as one display pixel.
+    MIN_RENDER_SCALE = 0.20
     MAX_RENDER_SCALE = 8.0
-    SCALE_STEP = 0.25
-    OVERSAMPLE = 1.35
+    LOW_ZOOM_LIMIT = 1.50
+    LOW_ZOOM_SCALE_STEP = 0.05
+    HIGH_ZOOM_SCALE_STEP = 0.25
+    HIGH_ZOOM_OVERSAMPLE = 1.35
 
     TILE_PIXEL_SIZE = 768
     MAX_TILE_CACHE_ITEMS = 256
@@ -72,16 +78,24 @@ class RenderManager:
         zoom_factor: float,
         device_pixel_ratio: float = 1.0,
     ) -> float:
-        raw_scale = (
-            max(float(zoom_factor), 0.1)
-            * max(float(device_pixel_ratio), 1.0)
-            * self.OVERSAMPLE
-        )
+        zoom = max(float(zoom_factor), self.MIN_RENDER_SCALE)
+        device_ratio = max(float(device_pixel_ratio), 1.0)
+        native_scale = zoom * device_ratio
+
+        if zoom <= self.LOW_ZOOM_LIMIT:
+            # Native-resolution mode: after the graphics-view transform,
+            # roughly one rendered pixel maps to one physical display pixel.
+            raw_scale = native_scale
+            step = self.LOW_ZOOM_SCALE_STEP
+        else:
+            raw_scale = native_scale * self.HIGH_ZOOM_OVERSAMPLE
+            step = self.HIGH_ZOOM_SCALE_STEP
+
         scale = max(
             self.MIN_RENDER_SCALE,
             min(raw_scale, self.MAX_RENDER_SCALE),
         )
-        quantized = round(scale / self.SCALE_STEP) * self.SCALE_STEP
+        quantized = round(scale / step) * step
         return max(
             self.MIN_RENDER_SCALE,
             min(quantized, self.MAX_RENDER_SCALE),
@@ -332,6 +346,7 @@ class RenderManager:
             render_scale,
             zoom_factor,
             self.hairline_enabled,
+            display_data.drawings,
         )
 
         rendered = RenderedTile(
@@ -373,6 +388,7 @@ class RenderManager:
             page_index=page_index,
             display_list=page.get_displaylist(),
             page_rect=page.rect,
+            drawings=tuple(page.get_drawings()),
         )
         self._display_list_cache[page_index] = data
         return data
