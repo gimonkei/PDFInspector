@@ -123,13 +123,22 @@ class RenderManager:
         zoom_factor: float,
         device_pixel_ratio: float = 1.0,
     ) -> list[RenderedPage]:
+        """
+        Render requested tiles in viewport-center-first order.
+
+        All tile candidates are collected before rendering. Their priority is
+        the squared distance from the requested region center to the tile
+        center, so the area the user is looking at becomes sharp first.
+        """
         render_scale = self.target_scale(
             zoom_factor,
             device_pixel_ratio,
         )
-        rendered_pages = []
 
-        for page_index, requested_region in sorted(page_regions.items()):
+        page_contexts = {}
+        tile_requests = []
+
+        for page_index, requested_region in page_regions.items():
             if page_index < 0 or page_index >= document.page_count:
                 continue
 
@@ -145,16 +154,57 @@ class RenderManager:
             if region.isEmpty():
                 continue
 
-            tiles = self._render_region_tiles(
-                data,
-                region,
-                render_scale,
-                zoom_factor,
+            page_contexts[page_index] = data
+            tile_requests.extend(
+                self._collect_region_tiles(
+                    data,
+                    region,
+                    render_scale,
+                )
             )
+
+        # Lowest distance is rendered first. Stable secondary keys keep the
+        # order deterministic when multiple tiles have equal priority.
+        tile_requests.sort(
+            key=lambda request: (
+                request[0],
+                request[1],
+                request[3],
+                request[2],
+            )
+        )
+
+        tiles_by_page = {
+            page_index: []
+            for page_index in page_contexts
+        }
+
+        for (
+            _priority,
+            page_index,
+            column,
+            row,
+            clip_rect,
+        ) in tile_requests:
+            data = page_contexts[page_index]
+            tiles_by_page[page_index].append(
+                self.render_tile(
+                    data,
+                    column,
+                    row,
+                    clip_rect,
+                    render_scale,
+                    zoom_factor,
+                )
+            )
+
+        rendered_pages = []
+        for page_index, data in page_contexts.items():
+            page_rect = data.page_rect
             rendered_pages.append(
                 RenderedPage(
                     page_index=page_index,
-                    tiles=tuple(tiles),
+                    tiles=tuple(tiles_by_page[page_index]),
                     render_scale=render_scale,
                     scene_width=float(page_rect.width),
                     scene_height=float(page_rect.height),
@@ -163,13 +213,13 @@ class RenderManager:
 
         return rendered_pages
 
-    def _render_region_tiles(
+    def _collect_region_tiles(
         self,
         display_data: PageDisplayData,
         region: QRectF,
         render_scale: float,
-        zoom_factor: float,
-    ) -> list[RenderedTile]:
+    ) -> list[tuple[float, int, int, int, object]]:
+        """Collect tile render requests with center-distance priorities."""
         page_rect = display_data.page_rect
         tile_scene_size = self.TILE_PIXEL_SIZE / render_scale
 
@@ -211,7 +261,10 @@ class RenderManager:
             ),
         )
 
-        tiles = []
+        focus_x = float(region.center().x())
+        focus_y = float(region.center().y())
+        requests = []
+
         for row in range(first_row, last_row + 1):
             for column in range(first_column, last_column + 1):
                 local_x0 = column * tile_scene_size
@@ -225,23 +278,29 @@ class RenderManager:
                     local_y0 + tile_scene_size,
                 )
 
+                tile_center_x = (local_x0 + local_x1) * 0.5
+                tile_center_y = (local_y0 + local_y1) * 0.5
+                delta_x = tile_center_x - focus_x
+                delta_y = tile_center_y - focus_y
+                priority = delta_x * delta_x + delta_y * delta_y
+
                 clip_rect = fitz.Rect(
                     page_rect.x0 + local_x0,
                     page_rect.y0 + local_y0,
                     page_rect.x0 + local_x1,
                     page_rect.y0 + local_y1,
                 )
-                tiles.append(
-                    self.render_tile(
-                        display_data,
+                requests.append(
+                    (
+                        priority,
+                        display_data.page_index,
                         column,
                         row,
                         clip_rect,
-                        render_scale,
-                        zoom_factor,
                     )
                 )
-        return tiles
+
+        return requests
 
     def render_tile(
         self,
