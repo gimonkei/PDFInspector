@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
-    QInputDialog,
     QSizePolicy,
     QToolBar,
     QWidget,
@@ -46,10 +45,6 @@ class MainWindow(QMainWindow):
         self.view.zoom_changed.connect(self.on_zoom_changed)
         self.view.visible_region_changed.connect(
             self.schedule_visible_tile_render
-        )
-        self.view.annotation_clicked.connect(self.on_annotation_clicked)
-        self.view.annotation_edit_requested.connect(
-            self.on_annotation_edit_requested
         )
         self.setCentralWidget(self.view)
 
@@ -92,31 +87,6 @@ class MainWindow(QMainWindow):
         )
         rotate_right_action.triggered.connect(self.rotate_right)
         toolbar.addAction(rotate_right_action)
-        toolbar.addSeparator()
-
-        self.annotation_group = QActionGroup(self)
-        self.annotation_group.setExclusive(True)
-
-        self.hand_action = QAction("✋ 移動", self)
-        self.hand_action.setCheckable(True)
-        self.hand_action.setChecked(True)
-        self.hand_action.triggered.connect(lambda: self.set_annotation_mode("hand"))
-        self.annotation_group.addAction(self.hand_action)
-        toolbar.addAction(self.hand_action)
-
-        self.check_action = QAction("✓ チェック", self)
-        self.check_action.setCheckable(True)
-        self.check_action.setToolTip("ページ上をクリックして赤いチェックを追加")
-        self.check_action.triggered.connect(lambda: self.set_annotation_mode("check"))
-        self.annotation_group.addAction(self.check_action)
-        toolbar.addAction(self.check_action)
-
-        self.comment_action = QAction("💬 コメント", self)
-        self.comment_action.setCheckable(True)
-        self.comment_action.setToolTip("ページ上をクリックしてコメントを追加")
-        self.comment_action.triggered.connect(lambda: self.set_annotation_mode("comment"))
-        self.annotation_group.addAction(self.comment_action)
-        toolbar.addAction(self.comment_action)
         toolbar.addSeparator()
 
         self.prev_action = QAction("◀", self)
@@ -203,81 +173,6 @@ class MainWindow(QMainWindow):
 
         self.update_toolbar()
 
-    def set_annotation_mode(self, mode):
-        self.view.set_annotation_mode(mode)
-
-    def on_annotation_clicked(self, page_index, page_point):
-        if not self.document.has_document():
-            return
-
-        if self.view.annotation_mode == "check":
-            self.view.add_check_overlay(page_index, page_point)
-        elif self.view.annotation_mode == "comment":
-            text, accepted = QInputDialog.getMultiLineText(
-                self,
-                "コメント追加",
-                "コメント内容:",
-            )
-            if not accepted or not text.strip():
-                return
-            self.view.add_text_overlay(page_index, page_point, text)
-
-    def on_annotation_edit_requested(self, item):
-        record = getattr(item, "record", None)
-        if not record or record.get("type") != "text":
-            return
-
-        text, accepted = QInputDialog.getMultiLineText(
-            self,
-            "コメント編集",
-            "コメント内容:",
-            record.get("text", ""),
-        )
-        if not accepted:
-            return
-
-        text = text.strip()
-        if not text:
-            self.view.scene.removeItem(item)
-            if item in self.view._annotation_items:
-                self.view._annotation_items.remove(item)
-            if record in self.view._annotation_records:
-                self.view._annotation_records.remove(record)
-            return
-
-        record["text"] = text
-        item.setPlainText(text)
-
-    def _commit_pending_annotations(self):
-        annotations = self.view.export_annotations()
-        if not annotations:
-            return False
-
-        for annotation in annotations:
-            if annotation["type"] == "check":
-                self.document.add_checkmark(
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation.get("size", 15.0),
-                )
-            elif annotation["type"] == "text":
-                self.document.add_freetext_comment(
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation["text"],
-                    annotation.get("font_size", 11.0),
-                )
-
-        self.view.clear_pending_annotations()
-        self.render_pipeline.invalidate()
-        self.render_manager.clear()
-        self.render_manager.prepare_document(self.document)
-        self.view.clear_rendered_tiles()
-        self.schedule_visible_tile_render()
-        return True
-
     def update_toolbar(self):
         has_pdf = self.document.has_document()
         self.prev_action.setEnabled(
@@ -287,9 +182,6 @@ class MainWindow(QMainWindow):
             has_pdf
             and self.current_page < self.document.page_count - 1
         )
-        self.hand_action.setEnabled(has_pdf)
-        self.check_action.setEnabled(has_pdf)
-        self.comment_action.setEnabled(has_pdf)
         self.page_label.setText(
             f"{self.current_page + 1} / {self.document.page_count}"
             if has_pdf
@@ -485,7 +377,6 @@ class MainWindow(QMainWindow):
         if not self.document.has_document():
             return
         try:
-            self._commit_pending_annotations()
             self.document.save()
         except PDFSaveError as error:
             QMessageBox.critical(
@@ -508,7 +399,6 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
         try:
-            self._commit_pending_annotations()
             self.document.save_as(path)
         except PDFSaveError as error:
             QMessageBox.critical(

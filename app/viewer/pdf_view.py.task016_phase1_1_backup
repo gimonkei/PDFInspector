@@ -1,56 +1,19 @@
 from PySide6.QtCore import QPointF, QRectF, QTimer, Signal, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QGraphicsItem,
-    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
-    QGraphicsTextItem,
-    QGraphicsView,
 )
 
 from app.viewer.graphics_view import GraphicsView
 from app.viewer.page_manager import PageManager
 
 
-
-class CheckAnnotationItem(QGraphicsPathItem):
-    def __init__(self, record):
-        path = QPainterPath()
-        path.moveTo(-7.0, 0.0)
-        path.lineTo(-2.0, 6.0)
-        path.lineTo(9.0, -8.0)
-        super().__init__(path)
-        self.record = record
-        self.setPen(QPen(QColor(220, 0, 0), 2.2))
-        self.setFlags(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
-            | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
-        )
-        self.setZValue(20.0)
-
-
-class TextAnnotationItem(QGraphicsTextItem):
-    def __init__(self, record):
-        super().__init__(record["text"])
-        self.record = record
-        font = QFont()
-        font.setPointSizeF(float(record.get("font_size", 11.0)))
-        self.setFont(font)
-        self.setDefaultTextColor(QColor(220, 0, 0))
-        self.setFlags(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
-            | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
-        )
-        self.setZValue(20.0)
-
-
 class PDFView(GraphicsView):
     page_changed = Signal(int)
     visible_region_changed = Signal()
     annotation_clicked = Signal(int, QPointF)
-    annotation_edit_requested = Signal(object)
 
     PAGE_MARGIN = 20.0
     PREFETCH_VIEWPORTS = 0.65
@@ -69,12 +32,6 @@ class PDFView(GraphicsView):
         self._tile_items = {}
         self._active_render_scale = None
         self.annotation_mode = "hand"
-        self._annotation_records = []
-        self._annotation_items = []
-        self._annotation_dragging = False
-        self._drag_annotation_item = None
-        self._drag_scene_start = None
-        self._drag_item_start = None
 
         self._visible_signal_timer = QTimer(self)
         self._visible_signal_timer.setSingleShot(True)
@@ -92,11 +49,7 @@ class PDFView(GraphicsView):
         if mode not in {"hand", "check", "comment"}:
             mode = "hand"
         self.annotation_mode = mode
-        cursor = (
-            Qt.CursorShape.ArrowCursor
-            if mode == "hand"
-            else Qt.CursorShape.CrossCursor
-        )
+        cursor = Qt.CursorShape.ArrowCursor if mode == "hand" else Qt.CursorShape.CrossCursor
         self.setCursor(cursor)
 
     def _page_point_at(self, scene_point):
@@ -106,209 +59,19 @@ class PDFView(GraphicsView):
             origin = self._page_origins.get(page_index)
             if origin is None:
                 return None
-            return (
-                page_index,
-                QPointF(
-                    scene_point.x() - origin[0],
-                    scene_point.y() - origin[1],
-                ),
-            )
+            return page_index, QPointF(scene_point.x() - origin[0], scene_point.y() - origin[1])
         return None
 
-    def add_check_overlay(self, page_index, point):
-        record = {
-            "type": "check",
-            "page_index": int(page_index),
-            "x": float(point.x()),
-            "y": float(point.y()),
-            "size": 15.0,
-        }
-        self._annotation_records.append(record)
-        self._create_annotation_item(record)
-
-    def add_text_overlay(self, page_index, point, text):
-        record = {
-            "type": "text",
-            "page_index": int(page_index),
-            "x": float(point.x()),
-            "y": float(point.y()),
-            "text": str(text).strip(),
-            "font_size": 11.0,
-        }
-        if not record["text"]:
-            return
-        self._annotation_records.append(record)
-        self._create_annotation_item(record)
-
-    def _create_annotation_item(self, record):
-        origin = self._page_origins.get(record["page_index"])
-        if origin is None:
-            return
-        item = (
-            CheckAnnotationItem(record)
-            if record["type"] == "check"
-            else TextAnnotationItem(record)
-        )
-        item.setPos(origin[0] + record["x"], origin[1] + record["y"])
-        self.scene.addItem(item)
-        self._annotation_items.append(item)
-
-    def _sync_annotation_records(self):
-        for item in list(self._annotation_items):
-            record = item.record
-            origin = self._page_origins.get(record["page_index"])
-            if origin is None:
-                continue
-            record["x"] = float(item.pos().x() - origin[0])
-            record["y"] = float(item.pos().y() - origin[1])
-
-    def _remove_annotation_items(self):
-        for item in list(self._annotation_items):
-            if item.scene() is self.scene:
-                self.scene.removeItem(item)
-        self._annotation_items.clear()
-
-    def _restore_annotation_items(self):
-        self._remove_annotation_items()
-        for record in self._annotation_records:
-            if record["page_index"] in self._page_origins:
-                self._create_annotation_item(record)
-
-    def export_annotations(self):
-        self._sync_annotation_records()
-        return [dict(record) for record in self._annotation_records]
-
-    def clear_pending_annotations(self):
-        self._remove_annotation_items()
-        self._annotation_records.clear()
-
-    def delete_selected_annotations(self):
-        selected = [
-            item
-            for item in self.scene.selectedItems()
-            if hasattr(item, "record")
-        ]
-        for item in selected:
-            record = item.record
-            if record in self._annotation_records:
-                self._annotation_records.remove(record)
-            if item in self._annotation_items:
-                self._annotation_items.remove(item)
-            self.scene.removeItem(item)
-
-    def _annotation_item_near(self, viewport_pos, radius=10):
-        best_item = None
-        best_distance = None
-
-        for item in self._annotation_items:
-            if item.scene() is not self.scene:
-                continue
-
-            viewport_rect = self.mapFromScene(
-                item.sceneBoundingRect()
-            ).boundingRect()
-            expanded = viewport_rect.adjusted(
-                -radius,
-                -radius,
-                radius,
-                radius,
-            )
-            if not expanded.contains(viewport_pos):
-                continue
-
-            center = viewport_rect.center()
-            dx = center.x() - viewport_pos.x()
-            dy = center.y() - viewport_pos.y()
-            distance = dx * dx + dy * dy
-            if best_distance is None or distance < best_distance:
-                best_item = item
-                best_distance = distance
-
-        return best_item
-
-    def _begin_annotation_drag(self, item, event):
-        self.scene.clearSelection()
-        item.setSelected(True)
-        self._annotation_dragging = True
-        self._drag_annotation_item = item
-        self._drag_scene_start = self.mapToScene(
-            event.position().toPoint()
-        )
-        self._drag_item_start = QPointF(item.pos())
-        event.accept()
-
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(
-                event.position().toPoint()
-            )
-            if nearby is not None:
-                self._begin_annotation_drag(nearby, event)
-                return
-
-            if self.annotation_mode != "hand":
-                hit = self._page_point_at(
-                    self.mapToScene(event.position().toPoint())
-                )
-                if hit is not None:
-                    self.annotation_clicked.emit(hit[0], hit[1])
-                event.accept()
-                return
-
+        if self.annotation_mode != "hand" and event.button() == Qt.MouseButton.LeftButton:
+            hit = self._page_point_at(self.mapToScene(event.position().toPoint()))
+            if hit is not None:
+                self.annotation_clicked.emit(hit[0], hit[1])
+            event.accept()
+            return
         super().mousePressEvent(event)
 
-    def mouseMoveEvent(self, event):
-        if (
-            self._annotation_dragging
-            and self._drag_annotation_item is not None
-        ):
-            current = self.mapToScene(event.position().toPoint())
-            delta = current - self._drag_scene_start
-            self._drag_annotation_item.setPos(
-                self._drag_item_start + delta
-            )
-            event.accept()
-            return
-
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if (
-            self._annotation_dragging
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            self._sync_annotation_records()
-            self._annotation_dragging = False
-            self._drag_annotation_item = None
-            self._drag_scene_start = None
-            self._drag_item_start = None
-            event.accept()
-            return
-
-        super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(
-                event.position().toPoint()
-            )
-            if isinstance(nearby, TextAnnotationItem):
-                self.annotation_edit_requested.emit(nearby)
-                event.accept()
-                return
-
-        super().mouseDoubleClickEvent(event)
-
-    def keyPressEvent(self, event):
-        if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
-            self.delete_selected_annotations()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
     def clear_pages(self):
-        self._sync_annotation_records()
-        self._annotation_items.clear()
         self.scene.clear()
         self.page_manager.clear()
         self._page_items.clear()
@@ -331,7 +94,6 @@ class PDFView(GraphicsView):
             self._show_single_page(self.current_page_index)
         else:
             self._show_continuous_pages()
-        self._restore_annotation_items()
         self._schedule_visible_region_changed()
 
     def refresh_pages(self, pages):

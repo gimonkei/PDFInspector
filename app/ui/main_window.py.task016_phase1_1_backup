@@ -48,9 +48,6 @@ class MainWindow(QMainWindow):
             self.schedule_visible_tile_render
         )
         self.view.annotation_clicked.connect(self.on_annotation_clicked)
-        self.view.annotation_edit_requested.connect(
-            self.on_annotation_edit_requested
-        )
         self.setCentralWidget(self.view)
 
         # Wait until zooming settles before switching render resolution.
@@ -209,74 +206,21 @@ class MainWindow(QMainWindow):
     def on_annotation_clicked(self, page_index, page_point):
         if not self.document.has_document():
             return
-
         if self.view.annotation_mode == "check":
-            self.view.add_check_overlay(page_index, page_point)
+            self.document.add_checkmark(page_index, page_point.x(), page_point.y())
         elif self.view.annotation_mode == "comment":
-            text, accepted = QInputDialog.getMultiLineText(
-                self,
-                "コメント追加",
-                "コメント内容:",
-            )
+            text, accepted = QInputDialog.getMultiLineText(self, "コメント追加", "コメント内容:")
             if not accepted or not text.strip():
                 return
-            self.view.add_text_overlay(page_index, page_point, text)
-
-    def on_annotation_edit_requested(self, item):
-        record = getattr(item, "record", None)
-        if not record or record.get("type") != "text":
+            self.document.add_comment(page_index, page_point.x(), page_point.y(), text)
+        else:
             return
-
-        text, accepted = QInputDialog.getMultiLineText(
-            self,
-            "コメント編集",
-            "コメント内容:",
-            record.get("text", ""),
-        )
-        if not accepted:
-            return
-
-        text = text.strip()
-        if not text:
-            self.view.scene.removeItem(item)
-            if item in self.view._annotation_items:
-                self.view._annotation_items.remove(item)
-            if record in self.view._annotation_records:
-                self.view._annotation_records.remove(record)
-            return
-
-        record["text"] = text
-        item.setPlainText(text)
-
-    def _commit_pending_annotations(self):
-        annotations = self.view.export_annotations()
-        if not annotations:
-            return False
-
-        for annotation in annotations:
-            if annotation["type"] == "check":
-                self.document.add_checkmark(
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation.get("size", 15.0),
-                )
-            elif annotation["type"] == "text":
-                self.document.add_freetext_comment(
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation["text"],
-                    annotation.get("font_size", 11.0),
-                )
-
-        self.view.clear_pending_annotations()
         self.render_pipeline.invalidate()
         self.render_manager.clear()
         self.render_manager.prepare_document(self.document)
         self.view.clear_rendered_tiles()
+        self.update_render_label()
         self.schedule_visible_tile_render()
-        return True
 
     def update_toolbar(self):
         has_pdf = self.document.has_document()
@@ -485,7 +429,6 @@ class MainWindow(QMainWindow):
         if not self.document.has_document():
             return
         try:
-            self._commit_pending_annotations()
             self.document.save()
         except PDFSaveError as error:
             QMessageBox.critical(
@@ -508,7 +451,6 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
         try:
-            self._commit_pending_annotations()
             self.document.save_as(path)
         except PDFSaveError as error:
             QMessageBox.critical(

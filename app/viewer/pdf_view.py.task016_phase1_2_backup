@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
-    QGraphicsView,
 )
 
 from app.viewer.graphics_view import GraphicsView
@@ -50,7 +49,6 @@ class PDFView(GraphicsView):
     page_changed = Signal(int)
     visible_region_changed = Signal()
     annotation_clicked = Signal(int, QPointF)
-    annotation_edit_requested = Signal(object)
 
     PAGE_MARGIN = 20.0
     PREFETCH_VIEWPORTS = 0.65
@@ -71,10 +69,6 @@ class PDFView(GraphicsView):
         self.annotation_mode = "hand"
         self._annotation_records = []
         self._annotation_items = []
-        self._annotation_dragging = False
-        self._drag_annotation_item = None
-        self._drag_scene_start = None
-        self._drag_item_start = None
 
         self._visible_signal_timer = QTimer(self)
         self._visible_signal_timer.setSingleShot(True)
@@ -196,108 +190,19 @@ class PDFView(GraphicsView):
                 self._annotation_items.remove(item)
             self.scene.removeItem(item)
 
-    def _annotation_item_near(self, viewport_pos, radius=10):
-        best_item = None
-        best_distance = None
-
-        for item in self._annotation_items:
-            if item.scene() is not self.scene:
-                continue
-
-            viewport_rect = self.mapFromScene(
-                item.sceneBoundingRect()
-            ).boundingRect()
-            expanded = viewport_rect.adjusted(
-                -radius,
-                -radius,
-                radius,
-                radius,
-            )
-            if not expanded.contains(viewport_pos):
-                continue
-
-            center = viewport_rect.center()
-            dx = center.x() - viewport_pos.x()
-            dy = center.y() - viewport_pos.y()
-            distance = dx * dx + dy * dy
-            if best_distance is None or distance < best_distance:
-                best_item = item
-                best_distance = distance
-
-        return best_item
-
-    def _begin_annotation_drag(self, item, event):
-        self.scene.clearSelection()
-        item.setSelected(True)
-        self._annotation_dragging = True
-        self._drag_annotation_item = item
-        self._drag_scene_start = self.mapToScene(
-            event.position().toPoint()
-        )
-        self._drag_item_start = QPointF(item.pos())
-        event.accept()
-
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(
-                event.position().toPoint()
-            )
-            if nearby is not None:
-                self._begin_annotation_drag(nearby, event)
-                return
-
-            if self.annotation_mode != "hand":
-                hit = self._page_point_at(
-                    self.mapToScene(event.position().toPoint())
-                )
-                if hit is not None:
-                    self.annotation_clicked.emit(hit[0], hit[1])
-                event.accept()
-                return
-
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
         if (
-            self._annotation_dragging
-            and self._drag_annotation_item is not None
-        ):
-            current = self.mapToScene(event.position().toPoint())
-            delta = current - self._drag_scene_start
-            self._drag_annotation_item.setPos(
-                self._drag_item_start + delta
-            )
-            event.accept()
-            return
-
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if (
-            self._annotation_dragging
+            self.annotation_mode != "hand"
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            self._sync_annotation_records()
-            self._annotation_dragging = False
-            self._drag_annotation_item = None
-            self._drag_scene_start = None
-            self._drag_item_start = None
+            hit = self._page_point_at(
+                self.mapToScene(event.position().toPoint())
+            )
+            if hit is not None:
+                self.annotation_clicked.emit(hit[0], hit[1])
             event.accept()
             return
-
-        super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(
-                event.position().toPoint()
-            )
-            if isinstance(nearby, TextAnnotationItem):
-                self.annotation_edit_requested.emit(nearby)
-                event.accept()
-                return
-
-        super().mouseDoubleClickEvent(event)
+        super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
