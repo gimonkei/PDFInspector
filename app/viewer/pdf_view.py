@@ -1,5 +1,10 @@
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QRectF, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QPen
+from PySide6.QtWidgets import (
+    QGraphicsPixmapItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+)
 
 from app.viewer.graphics_view import GraphicsView
 from app.viewer.page_manager import PageManager
@@ -7,6 +12,10 @@ from app.viewer.page_manager import PageManager
 
 class PDFView(GraphicsView):
     page_changed = Signal(int)
+    visible_region_changed = Signal()
+
+    PAGE_MARGIN = 20.0
+    PREFETCH_VIEWPORTS = 0.65
 
     def __init__(self):
         super().__init__()
@@ -16,56 +25,197 @@ class PDFView(GraphicsView):
         self.pages = []
         self.current_page_index = 0
         self.single_page_mode = True
+
+        self._page_items = {}
+        self._page_origins = {}
+        self._tile_items = {}
+        self._active_render_scale = None
+
+        self._visible_signal_timer = QTimer(self)
+        self._visible_signal_timer.setSingleShot(True)
+        self._visible_signal_timer.setInterval(40)
+        self._visible_signal_timer.timeout.connect(
+            self.visible_region_changed.emit
+        )
+
         self.verticalScrollBar().valueChanged.connect(self.on_scroll)
+        self.horizontalScrollBar().valueChanged.connect(
+            self._schedule_visible_region_changed
+        )
 
     def clear_pages(self):
         self.scene.clear()
         self.page_manager.clear()
-
-    def add_page(self, rendered_page, page_index: int, y_position: float):
-        item = QGraphicsPixmapItem(rendered_page.pixmap)
-        inverse_scale = 1.0 / rendered_page.render_scale if rendered_page.render_scale > 0 else 1.0
-        item.setScale(inverse_scale)
-        item.setPos(0, y_position)
-        self.scene.addItem(item)
-        rect = item.sceneBoundingRect()
-        self.page_manager.add_page(
-            page_index,
-            rendered_page.pixmap,
-            item,
-            rect.top(),
-            rect.bottom(),
-        )
+        self._page_items.clear()
+        self._page_origins.clear()
+        self._tile_items.clear()
+        self._active_render_scale = None
 
     def show_pages(self, pages):
+        """Create page placeholders only. No PDF bitmap is rendered here."""
         self.pages = list(pages)
         if not self.pages:
             self.clear_pages()
             return
 
-        self.current_page_index = min(self.current_page_index, len(self.pages) - 1)
+        self.current_page_index = min(
+            self.current_page_index,
+            len(self.pages) - 1,
+        )
         if self.single_page_mode:
             self._show_single_page(self.current_page_index)
         else:
             self._show_continuous_pages()
+        self._schedule_visible_region_changed()
 
     def refresh_pages(self, pages):
         center = self.mapToScene(self.viewport().rect().center())
         page_index = self.current_page_index
         self.show_pages(pages)
-        self.current_page_index = min(page_index, max(0, len(self.pages) - 1))
+        self.current_page_index = min(
+            page_index,
+            max(0, len(self.pages) - 1),
+        )
         self.centerOn(center)
+        self._schedule_visible_region_changed()
+
+    def clear_rendered_tiles(self):
+        for item in list(self._tile_items.values()):
+            self.scene.removeItem(item)
+        self._tile_items.clear()
+        self._active_render_scale = None
+        self._schedule_visible_region_changed()
+
+    def apply_rendered_pages(self, rendered_pages):
+        for rendered_page in rendered_pages:
+            origin = self._page_origins.get(rendered_page.page_index)
+            if origin is None:
+                continue
+
+            if (
+                self._active_render_scale is not None
+                and abs(
+                    self._active_render_scale
+                    - rendered_page.render_scale
+                ) > 1e-6
+            ):
+                self.clear_rendered_tiles()
+
+            self._active_render_scale = rendered_page.render_scale
+
+            for tile in rendered_page.tiles:
+                if tile.pixmap.isNull():
+                    continue
+
+                key = (
+                    tile.page_index,
+                    tile.column,
+                    tile.row,
+                    round(tile.render_scale, 2),
+                )
+                if key in self._tile_items:
+                    continue
+
+                item = QGraphicsPixmapItem(tile.pixmap)
+                inverse_scale = (
+                    1.0 / tile.render_scale
+                    if tile.render_scale > 0
+                    else 1.0
+                )
+                item.setScale(inverse_scale)
+                item.setPos(
+                    origin[0] + tile.scene_x,
+                    origin[1] + tile.scene_y,
+                )
+                item.setZValue(0.0)
+                self.scene.addItem(item)
+                self._tile_items[key] = item
+
+    def visible_page_regions(self) -> dict[int, QRectF]:
+        """
+        Return visible and near-visible page regions in page-local coordinates.
+
+        A viewport margin is included to pre-render a small area around the
+        screen, reducing blank flashes during normal scrolling.
+        """
+        if not self._page_origins:
+            return {}
+
+        visible_scene = self.mapToScene(
+            self.viewport().rect()
+        ).boundingRect()
+
+        extra_x = visible_scene.width() * self.PREFETCH_VIEWPORTS
+        extra_y = visible_scene.height() * self.PREFETCH_VIEWPORTS
+        requested_scene = visible_scene.adjusted(
+            -extra_x,
+            -extra_y,
+            extra_x,
+            extra_y,
+        )
+
+        regions = {}
+        for page in self.page_manager.pages:
+            page_rect = page.item.sceneBoundingRect()
+            intersection = requested_scene.intersected(page_rect)
+            if intersection.isEmpty():
+                continue
+
+            origin = self._page_origins.get(page.page)
+            if origin is None:
+                continue
+
+            regions[page.page] = QRectF(
+                intersection.x() - origin[0],
+                intersection.y() - origin[1],
+                intersection.width(),
+                intersection.height(),
+            )
+        return regions
 
     def set_single_mode(self):
         self.single_page_mode = True
         if self.pages:
             self._show_single_page(self.current_page_index)
+            self._schedule_visible_region_changed()
 
     def set_continuous_mode(self):
         self.single_page_mode = False
         if self.pages:
             self._show_continuous_pages()
             self.scroll_to_page(self.current_page_index)
+            self._schedule_visible_region_changed()
+
+    def _add_page_placeholder(
+        self,
+        rendered_page,
+        page_index: int,
+        y_position: float,
+    ):
+        page_item = QGraphicsRectItem(
+            QRectF(
+                0.0,
+                y_position,
+                rendered_page.scene_width,
+                rendered_page.scene_height,
+            )
+        )
+        page_item.setBrush(QBrush(QColor("white")))
+        page_item.setPen(QPen(QColor(190, 190, 190)))
+        page_item.setZValue(-1.0)
+        self.scene.addItem(page_item)
+
+        self._page_items[page_index] = page_item
+        self._page_origins[page_index] = (0.0, y_position)
+
+        rect = page_item.sceneBoundingRect()
+        self.page_manager.add_page(
+            page_index,
+            None,
+            page_item,
+            rect.top(),
+            rect.bottom(),
+        )
 
     def _show_single_page(self, page_index):
         if page_index < 0 or page_index >= len(self.pages):
@@ -74,7 +224,11 @@ class PDFView(GraphicsView):
         current_zoom = self.zoom_factor
         self.clear_pages()
         self.current_page_index = page_index
-        self.add_page(self.pages[page_index], page_index, 0)
+        self._add_page_placeholder(
+            self.pages[page_index],
+            page_index,
+            0.0,
+        )
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
         self._restore_zoom(current_zoom)
 
@@ -82,11 +236,10 @@ class PDFView(GraphicsView):
         current_zoom = self.zoom_factor
         self.clear_pages()
         y = 0.0
-        margin = 20.0
 
         for index, rendered_page in enumerate(self.pages):
-            self.add_page(rendered_page, index, y)
-            y += rendered_page.scene_height + margin
+            self._add_page_placeholder(rendered_page, index, y)
+            y += rendered_page.scene_height + self.PAGE_MARGIN
 
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
         self._restore_zoom(current_zoom)
@@ -103,11 +256,15 @@ class PDFView(GraphicsView):
         self.current_page_index = page_index
         if self.single_page_mode:
             self._show_single_page(page_index)
+            self._schedule_visible_region_changed()
             return
 
         for page in self.page_manager.pages:
             if page.page == page_index:
-                self.verticalScrollBar().setValue(int(page.top * self.zoom_factor))
+                self.verticalScrollBar().setValue(
+                    int(page.top * self.zoom_factor)
+                )
+                self._schedule_visible_region_changed()
                 return
 
     def get_visible_page(self):
@@ -116,16 +273,25 @@ class PDFView(GraphicsView):
 
         point = self.mapToScene(self.viewport().rect().topLeft())
         y = point.y() + (
-            self.viewport().height() / max(self.zoom_factor, 0.01) * 0.2
+            self.viewport().height()
+            / max(self.zoom_factor, 0.01)
+            * 0.2
         )
         return self.page_manager.visible_page(y)
 
     def on_scroll(self):
-        if self.single_page_mode:
-            return
-        page = self.get_visible_page()
-        self.current_page_index = page
-        self.page_changed.emit(page)
+        if not self.single_page_mode:
+            page = self.get_visible_page()
+            self.current_page_index = page
+            self.page_changed.emit(page)
+        self._schedule_visible_region_changed()
+
+    def _schedule_visible_region_changed(self):
+        self._visible_signal_timer.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_visible_region_changed()
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
