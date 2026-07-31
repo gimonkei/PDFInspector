@@ -63,8 +63,6 @@ class MainWindow(QMainWindow):
         self.view.annotation_clicked.connect(self.on_annotation_clicked)
         self.view.annotation_edit_requested.connect(self.on_annotation_edit_requested)
         self.view.annotation_selected.connect(self.on_annotation_selected)
-        self.view.undo_available_changed.connect(self.on_undo_available_changed)
-        self.view.redo_available_changed.connect(self.on_redo_available_changed)
         self.setCentralWidget(self.view)
 
         # Wait until zooming settles before switching render resolution.
@@ -141,21 +139,6 @@ class MainWindow(QMainWindow):
         )
         self.annotation_group.addAction(self.date_stamp_action)
         toolbar.addAction(self.date_stamp_action)
-        toolbar.addSeparator()
-
-        self.undo_action = QAction("↶ 元に戻す", self)
-        self.undo_action.setToolTip("注釈操作を元に戻す (Ctrl+Z)")
-        self.undo_action.setShortcut("Ctrl+Z")
-        self.undo_action.setEnabled(False)
-        self.undo_action.triggered.connect(self.view.undo_annotations)
-        toolbar.addAction(self.undo_action)
-
-        self.redo_action = QAction("↷ やり直す", self)
-        self.redo_action.setToolTip("元に戻した注釈操作をやり直す (Ctrl+Y)")
-        self.redo_action.setShortcut("Ctrl+Y")
-        self.redo_action.setEnabled(False)
-        self.redo_action.triggered.connect(self.view.redo_annotations)
-        toolbar.addAction(self.redo_action)
         toolbar.addSeparator()
 
         self.prev_action = QAction("◀", self)
@@ -241,14 +224,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.view_mode)
 
         self.update_toolbar()
-
-    def on_undo_available_changed(self, available):
-        if hasattr(self, "undo_action"):
-            self.undo_action.setEnabled(bool(available))
-
-    def on_redo_available_changed(self, available):
-        if hasattr(self, "redo_action"):
-            self.redo_action.setEnabled(bool(available))
 
     def create_date_stamp_panel(self):
         self.selected_date_stamp_item = None
@@ -458,18 +433,15 @@ class MainWindow(QMainWindow):
         item = self.selected_date_stamp_item
         if item is None or item.scene() is None:
             return
-        self.view.update_annotation_record(
-            item,
-            {
-                "top": self.stamp_top_edit.text().strip(),
-                "date": self.stamp_date_edit.text().strip(),
-                "bottom": self.stamp_bottom_edit.text().strip(),
-                "color": self.stamp_color_combo.currentData(),
-                "size": float(self.stamp_size_spin.value()),
-                "line_width": float(self.stamp_line_spin.value()),
-            },
-            merge_property_edits=True,
-        )
+        item.record.update({
+            "top": self.stamp_top_edit.text().strip(),
+            "date": self.stamp_date_edit.text().strip(),
+            "bottom": self.stamp_bottom_edit.text().strip(),
+            "color": self.stamp_color_combo.currentData(),
+            "size": float(self.stamp_size_spin.value()),
+            "line_width": float(self.stamp_line_spin.value()),
+        })
+        item.refresh_from_record()
 
     def on_annotation_edit_requested(self, item):
         record = getattr(item, "record", {})
@@ -484,9 +456,14 @@ class MainWindow(QMainWindow):
                 return
             text = text.strip()
             if not text:
-                self.view.remove_annotation_item(item)
+                self.view.scene.removeItem(item)
+                if item in self.view._annotation_items:
+                    self.view._annotation_items.remove(item)
+                if record in self.view._annotation_records:
+                    self.view._annotation_records.remove(record)
                 return
-            self.view.update_annotation_record(item, {"text": text})
+            record["text"] = text
+            item.setPlainText(text)
 
     def set_annotation_mode(self, mode):
         self.view.set_annotation_mode(mode)
@@ -571,9 +548,6 @@ class MainWindow(QMainWindow):
         self.check_action.setEnabled(has_pdf)
         self.comment_action.setEnabled(has_pdf)
         self.date_stamp_action.setEnabled(has_pdf)
-        if not has_pdf:
-            self.undo_action.setEnabled(False)
-            self.redo_action.setEnabled(False)
         self.page_label.setText(
             f"{self.current_page + 1} / {self.document.page_count}"
             if has_pdf
@@ -688,8 +662,6 @@ class MainWindow(QMainWindow):
             return
         try:
             self.document.open(path)
-            self.selected_date_stamp_item = None
-            self.view.clear_pending_annotations()
             self.render_pipeline.invalidate()
             self.render_manager.clear()
             self.render_manager.prepare_document(self.document)

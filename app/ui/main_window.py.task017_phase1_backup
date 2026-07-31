@@ -1,28 +1,15 @@
-from datetime import date
-import json
-from pathlib import Path
-
-from PySide6.QtCore import QStandardPaths, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
-    QDockWidget,
-    QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QInputDialog,
-    QHBoxLayout,
-    QPushButton,
     QSizePolicy,
-    QSpinBox,
     QToolBar,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -61,10 +48,9 @@ class MainWindow(QMainWindow):
             self.schedule_visible_tile_render
         )
         self.view.annotation_clicked.connect(self.on_annotation_clicked)
-        self.view.annotation_edit_requested.connect(self.on_annotation_edit_requested)
-        self.view.annotation_selected.connect(self.on_annotation_selected)
-        self.view.undo_available_changed.connect(self.on_undo_available_changed)
-        self.view.redo_available_changed.connect(self.on_redo_available_changed)
+        self.view.annotation_edit_requested.connect(
+            self.on_annotation_edit_requested
+        )
         self.setCentralWidget(self.view)
 
         # Wait until zooming settles before switching render resolution.
@@ -80,7 +66,6 @@ class MainWindow(QMainWindow):
         self.visible_tile_timer.timeout.connect(self.render_visible_tiles)
 
         self.create_toolbar()
-        self.create_date_stamp_panel()
 
     def create_toolbar(self):
         toolbar = QToolBar()
@@ -132,30 +117,6 @@ class MainWindow(QMainWindow):
         self.comment_action.triggered.connect(lambda: self.set_annotation_mode("comment"))
         self.annotation_group.addAction(self.comment_action)
         toolbar.addAction(self.comment_action)
-
-        self.date_stamp_action = QAction("◉ デート印", self)
-        self.date_stamp_action.setCheckable(True)
-        self.date_stamp_action.setToolTip("ページ上をクリックしてデート印を追加")
-        self.date_stamp_action.triggered.connect(
-            lambda: self.set_annotation_mode("date_stamp")
-        )
-        self.annotation_group.addAction(self.date_stamp_action)
-        toolbar.addAction(self.date_stamp_action)
-        toolbar.addSeparator()
-
-        self.undo_action = QAction("↶ 元に戻す", self)
-        self.undo_action.setToolTip("注釈操作を元に戻す (Ctrl+Z)")
-        self.undo_action.setShortcut("Ctrl+Z")
-        self.undo_action.setEnabled(False)
-        self.undo_action.triggered.connect(self.view.undo_annotations)
-        toolbar.addAction(self.undo_action)
-
-        self.redo_action = QAction("↷ やり直す", self)
-        self.redo_action.setToolTip("元に戻した注釈操作をやり直す (Ctrl+Y)")
-        self.redo_action.setShortcut("Ctrl+Y")
-        self.redo_action.setEnabled(False)
-        self.redo_action.triggered.connect(self.view.redo_annotations)
-        toolbar.addAction(self.redo_action)
         toolbar.addSeparator()
 
         self.prev_action = QAction("◀", self)
@@ -242,257 +203,8 @@ class MainWindow(QMainWindow):
 
         self.update_toolbar()
 
-    def on_undo_available_changed(self, available):
-        if hasattr(self, "undo_action"):
-            self.undo_action.setEnabled(bool(available))
-
-    def on_redo_available_changed(self, available):
-        if hasattr(self, "redo_action"):
-            self.redo_action.setEnabled(bool(available))
-
-    def create_date_stamp_panel(self):
-        self.selected_date_stamp_item = None
-        self.date_stamp_templates = self._load_date_stamp_templates()
-        self.date_stamp_dock = QDockWidget("デート印の編集", self)
-        self.date_stamp_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea
-            | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        form = QFormLayout()
-
-        self.stamp_template_combo = QComboBox()
-        self._refresh_template_combo()
-        template_buttons = QHBoxLayout()
-        self.stamp_template_save_button = QPushButton("保存")
-        self.stamp_template_delete_button = QPushButton("削除")
-        template_buttons.addWidget(self.stamp_template_save_button)
-        template_buttons.addWidget(self.stamp_template_delete_button)
-        template_widget = QWidget()
-        template_widget.setLayout(template_buttons)
-
-        self.stamp_top_edit = QLineEdit("検図")
-        self.stamp_date_edit = QLineEdit(date.today().strftime("'%y/%m/%d"))
-        self.stamp_date_edit.setReadOnly(True)
-        self.stamp_today_check = QCheckBox("配置時の今日の日付を使用")
-        self.stamp_today_check.setChecked(True)
-        self.stamp_today_check.setEnabled(False)
-        self.stamp_bottom_edit = QLineEdit("松井")
-        self.stamp_color_combo = QComboBox()
-        self.stamp_color_combo.addItem("黒", "black")
-        self.stamp_color_combo.addItem("青", "blue")
-        self.stamp_color_combo.addItem("赤", "red")
-        self.stamp_size_spin = QSpinBox()
-        self.stamp_size_spin.setRange(42, 240)
-        self.stamp_size_spin.setValue(72)
-        self.stamp_size_spin.setSuffix(" pt")
-        self.stamp_line_spin = QDoubleSpinBox()
-        self.stamp_line_spin.setRange(0.5, 6.0)
-        self.stamp_line_spin.setSingleStep(0.25)
-        self.stamp_line_spin.setValue(1.5)
-        self.stamp_line_spin.setSuffix(" pt")
-
-        form.addRow("テンプレート", self.stamp_template_combo)
-        form.addRow("", template_widget)
-        form.addRow("上段", self.stamp_top_edit)
-        form.addRow("日付", self.stamp_date_edit)
-        form.addRow("", self.stamp_today_check)
-        form.addRow("下段", self.stamp_bottom_edit)
-        form.addRow("色", self.stamp_color_combo)
-        form.addRow("サイズ", self.stamp_size_spin)
-        form.addRow("線幅", self.stamp_line_spin)
-        layout.addLayout(form)
-        guide = QLabel(
-            "テンプレートの日付は保存せず、配置時に今日の日付を設定します。\n"
-            "移動: 印の中央をドラッグ\n"
-            "サイズ: 選択後、四隅をドラッグ\n"
-            "編集: ダブルクリックまたは右パネル"
-        )
-        guide.setWordWrap(True)
-        layout.addWidget(guide)
-        layout.addStretch()
-        self.date_stamp_dock.setWidget(panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.date_stamp_dock)
-        self.date_stamp_dock.hide()
-
-        self.stamp_top_edit.textChanged.connect(self.update_selected_date_stamp)
-        self.stamp_bottom_edit.textChanged.connect(self.update_selected_date_stamp)
-        self.stamp_color_combo.currentIndexChanged.connect(self.update_selected_date_stamp)
-        self.stamp_size_spin.valueChanged.connect(self.update_selected_date_stamp)
-        self.stamp_line_spin.valueChanged.connect(self.update_selected_date_stamp)
-        self.stamp_template_combo.currentIndexChanged.connect(self.on_date_stamp_template_selected)
-        self.stamp_template_save_button.clicked.connect(self.save_date_stamp_template)
-        self.stamp_template_delete_button.clicked.connect(self.delete_date_stamp_template)
-
-    def _template_file_path(self):
-        base = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation))
-        base.mkdir(parents=True, exist_ok=True)
-        return base / "date_stamp_templates.json"
-
-    def _load_date_stamp_templates(self):
-        path = self._template_file_path()
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _write_date_stamp_templates(self):
-        path = self._template_file_path()
-        path.write_text(
-            json.dumps(self.date_stamp_templates, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def _refresh_template_combo(self, selected_name=None):
-        combo = getattr(self, "stamp_template_combo", None)
-        if combo is None:
-            return
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("新規作成", "")
-        for name in sorted(self.date_stamp_templates):
-            combo.addItem(name, name)
-        if selected_name:
-            index = combo.findData(selected_name)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-        combo.blockSignals(False)
-
-    def on_date_stamp_template_selected(self, _index):
-        name = self.stamp_template_combo.currentData()
-        if not name:
-            return
-        settings = self.date_stamp_templates.get(name)
-        if not settings:
-            return
-        widgets = [
-            self.stamp_top_edit, self.stamp_bottom_edit, self.stamp_color_combo,
-            self.stamp_size_spin, self.stamp_line_spin,
-        ]
-        for widget in widgets:
-            widget.blockSignals(True)
-        self.stamp_top_edit.setText(settings.get("top", ""))
-        self.stamp_bottom_edit.setText(settings.get("bottom", ""))
-        color_index = self.stamp_color_combo.findData(settings.get("color", "black"))
-        self.stamp_color_combo.setCurrentIndex(max(0, color_index))
-        self.stamp_size_spin.setValue(round(float(settings.get("size", 72.0))))
-        self.stamp_line_spin.setValue(float(settings.get("line_width", 1.5)))
-        self.stamp_date_edit.setText(date.today().strftime("'%y/%m/%d"))
-        for widget in widgets:
-            widget.blockSignals(False)
-        self.update_selected_date_stamp()
-
-    def save_date_stamp_template(self):
-        current = self.stamp_template_combo.currentData()
-        name, accepted = QInputDialog.getText(
-            self, "テンプレート保存", "テンプレート名:", text=current or ""
-        )
-        name = name.strip()
-        if not accepted or not name:
-            return
-        settings = self.current_date_stamp_settings()
-        settings.pop("date", None)
-        settings["use_today"] = True
-        self.date_stamp_templates[name] = settings
-        self._write_date_stamp_templates()
-        self._refresh_template_combo(name)
-
-    def delete_date_stamp_template(self):
-        name = self.stamp_template_combo.currentData()
-        if not name:
-            return
-        answer = QMessageBox.question(
-            self, "テンプレート削除", f"「{name}」を削除しますか？"
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self.date_stamp_templates.pop(name, None)
-        self._write_date_stamp_templates()
-        self._refresh_template_combo()
-
-    def current_date_stamp_settings(self):
-        today_text = date.today().strftime("'%y/%m/%d")
-        self.stamp_date_edit.setText(today_text)
-        return {
-            "top": self.stamp_top_edit.text().strip(),
-            "date": today_text,
-            "bottom": self.stamp_bottom_edit.text().strip(),
-            "color": self.stamp_color_combo.currentData(),
-            "size": float(self.stamp_size_spin.value()),
-            "line_width": float(self.stamp_line_spin.value()),
-        }
-
-    def on_annotation_selected(self, item):
-        if getattr(item, "record", {}).get("type") != "date_stamp":
-            self.selected_date_stamp_item = None
-            return
-        self.selected_date_stamp_item = item
-        record = item.record
-        widgets = [
-            self.stamp_top_edit,
-            self.stamp_date_edit,
-            self.stamp_bottom_edit,
-            self.stamp_color_combo,
-            self.stamp_size_spin,
-            self.stamp_line_spin,
-        ]
-        for widget in widgets:
-            widget.blockSignals(True)
-        self.stamp_top_edit.setText(record.get("top", ""))
-        self.stamp_date_edit.setText(record.get("date", ""))
-        self.stamp_bottom_edit.setText(record.get("bottom", ""))
-        color_index = self.stamp_color_combo.findData(record.get("color", "black"))
-        self.stamp_color_combo.setCurrentIndex(max(0, color_index))
-        self.stamp_size_spin.setValue(round(float(record.get("size", 72.0))))
-        self.stamp_line_spin.setValue(float(record.get("line_width", 1.5)))
-        for widget in widgets:
-            widget.blockSignals(False)
-        self.date_stamp_dock.show()
-        self.date_stamp_dock.raise_()
-
-    def update_selected_date_stamp(self):
-        item = self.selected_date_stamp_item
-        if item is None or item.scene() is None:
-            return
-        self.view.update_annotation_record(
-            item,
-            {
-                "top": self.stamp_top_edit.text().strip(),
-                "date": self.stamp_date_edit.text().strip(),
-                "bottom": self.stamp_bottom_edit.text().strip(),
-                "color": self.stamp_color_combo.currentData(),
-                "size": float(self.stamp_size_spin.value()),
-                "line_width": float(self.stamp_line_spin.value()),
-            },
-            merge_property_edits=True,
-        )
-
-    def on_annotation_edit_requested(self, item):
-        record = getattr(item, "record", {})
-        if record.get("type") == "date_stamp":
-            self.on_annotation_selected(item)
-            return
-        if record.get("type") == "text":
-            text, accepted = QInputDialog.getMultiLineText(
-                self, "コメント編集", "コメント内容:", record.get("text", "")
-            )
-            if not accepted:
-                return
-            text = text.strip()
-            if not text:
-                self.view.remove_annotation_item(item)
-                return
-            self.view.update_annotation_record(item, {"text": text})
-
     def set_annotation_mode(self, mode):
         self.view.set_annotation_mode(mode)
-        if mode == "date_stamp":
-            self.date_stamp_dock.show()
-            self.date_stamp_dock.raise_()
 
     def on_annotation_clicked(self, page_index, page_point):
         if not self.document.has_document():
@@ -509,12 +221,32 @@ class MainWindow(QMainWindow):
             if not accepted or not text.strip():
                 return
             self.view.add_text_overlay(page_index, page_point, text)
-        elif self.view.annotation_mode == "date_stamp":
-            self.view.add_date_stamp_overlay(
-                page_index,
-                page_point,
-                self.current_date_stamp_settings(),
-            )
+
+    def on_annotation_edit_requested(self, item):
+        record = getattr(item, "record", None)
+        if not record or record.get("type") != "text":
+            return
+
+        text, accepted = QInputDialog.getMultiLineText(
+            self,
+            "コメント編集",
+            "コメント内容:",
+            record.get("text", ""),
+        )
+        if not accepted:
+            return
+
+        text = text.strip()
+        if not text:
+            self.view.scene.removeItem(item)
+            if item in self.view._annotation_items:
+                self.view._annotation_items.remove(item)
+            if record in self.view._annotation_records:
+                self.view._annotation_records.remove(record)
+            return
+
+        record["text"] = text
+        item.setPlainText(text)
 
     def _commit_pending_annotations(self):
         annotations = self.view.export_annotations()
@@ -537,18 +269,6 @@ class MainWindow(QMainWindow):
                     annotation["text"],
                     annotation.get("font_size", 11.0),
                 )
-            elif annotation["type"] == "date_stamp":
-                self.document.add_date_stamp(
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation.get("top", ""),
-                    annotation.get("date", ""),
-                    annotation.get("bottom", ""),
-                    annotation.get("color", "black"),
-                    annotation.get("size", 72.0),
-                    annotation.get("line_width", 1.5),
-                )
 
         self.view.clear_pending_annotations()
         self.render_pipeline.invalidate()
@@ -570,10 +290,6 @@ class MainWindow(QMainWindow):
         self.hand_action.setEnabled(has_pdf)
         self.check_action.setEnabled(has_pdf)
         self.comment_action.setEnabled(has_pdf)
-        self.date_stamp_action.setEnabled(has_pdf)
-        if not has_pdf:
-            self.undo_action.setEnabled(False)
-            self.redo_action.setEnabled(False)
         self.page_label.setText(
             f"{self.current_page + 1} / {self.document.page_count}"
             if has_pdf
@@ -688,8 +404,6 @@ class MainWindow(QMainWindow):
             return
         try:
             self.document.open(path)
-            self.selected_date_stamp_item = None
-            self.view.clear_pending_annotations()
             self.render_pipeline.invalidate()
             self.render_manager.clear()
             self.render_manager.prepare_document(self.document)

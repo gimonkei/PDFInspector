@@ -1,10 +1,7 @@
-from copy import deepcopy
-
 from PySide6.QtCore import QPointF, QRectF, QTimer, Signal, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsItem,
-    QGraphicsObject,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
@@ -15,7 +12,6 @@ from PySide6.QtWidgets import (
 
 from app.viewer.graphics_view import GraphicsView
 from app.viewer.page_manager import PageManager
-from app.annotations.date_stamp import draw_date_stamp
 
 
 
@@ -50,139 +46,11 @@ class TextAnnotationItem(QGraphicsTextItem):
         self.setZValue(20.0)
 
 
-class DateStampItem(QGraphicsObject):
-    HANDLE_SIZE = 8.0
-    MIN_SIZE = 42.0
-
-    def __init__(self, record):
-        super().__init__()
-        self.record = record
-        self._resizing = False
-        self._resize_corner = None
-        self._resize_start_scene = None
-        self._resize_start_size = None
-        self.setAcceptHoverEvents(True)
-        self.setFlags(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
-            | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
-            | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
-        )
-        self.setZValue(21.0)
-
-    def stamp_size(self):
-        return max(float(self.record.get("size", 72.0)), self.MIN_SIZE)
-
-    def boundingRect(self):
-        size = self.stamp_size()
-        pad = self.HANDLE_SIZE + 3.0
-        return QRectF(-size / 2 - pad, -size / 2 - pad, size + pad * 2, size + pad * 2)
-
-    def _stamp_rect(self):
-        size = self.stamp_size()
-        return QRectF(-size / 2, -size / 2, size, size)
-
-    def _color(self):
-        name = self.record.get("color", "black")
-        return {
-            "black": QColor(0, 0, 0),
-            "blue": QColor(0, 70, 220),
-            "red": QColor(220, 0, 0),
-        }.get(name, QColor(0, 0, 0))
-
-    def _handle_rects(self):
-        rect = self._stamp_rect()
-        hs = self.HANDLE_SIZE
-        points = {
-            "tl": rect.topLeft(),
-            "tr": rect.topRight(),
-            "bl": rect.bottomLeft(),
-            "br": rect.bottomRight(),
-        }
-        return {
-            key: QRectF(point.x() - hs / 2, point.y() - hs / 2, hs, hs)
-            for key, point in points.items()
-        }
-
-    def paint(self, painter, option, widget=None):
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = self._stamp_rect()
-        draw_date_stamp(painter, rect, self.record)
-
-        if self.isSelected():
-            selection_pen = QPen(QColor(40, 120, 230), 1.0, Qt.PenStyle.DashLine)
-            painter.setPen(selection_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect)
-            painter.setPen(QPen(QColor(40, 120, 230), 1.0))
-            painter.setBrush(QBrush(QColor(255, 255, 255)))
-            for handle in self._handle_rects().values():
-                painter.drawRect(handle)
-
-    def _corner_at(self, position):
-        if not self.isSelected():
-            return None
-        for name, rect in self._handle_rects().items():
-            if rect.adjusted(-3, -3, 3, 3).contains(position):
-                return name
-        return None
-
-    def hoverMoveEvent(self, event):
-        if self._corner_at(event.pos()) is not None:
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        else:
-            self.setCursor(Qt.CursorShape.SizeAllCursor)
-        super().hoverMoveEvent(event)
-
-    def hoverLeaveEvent(self, event):
-        self.unsetCursor()
-        super().hoverLeaveEvent(event)
-
-    def mousePressEvent(self, event):
-        corner = self._corner_at(event.pos())
-        if corner is not None and event.button() == Qt.MouseButton.LeftButton:
-            self._resizing = True
-            self._resize_corner = corner
-            self._resize_start_scene = event.scenePos()
-            self._resize_start_size = self.stamp_size()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._resizing:
-            delta = event.scenePos() - self._resize_start_scene
-            sign_x = -1.0 if "l" in self._resize_corner else 1.0
-            sign_y = -1.0 if "t" in self._resize_corner else 1.0
-            change = (delta.x() * sign_x + delta.y() * sign_y) / 2.0
-            new_size = max(self.MIN_SIZE, self._resize_start_size + change * 2.0)
-            self.prepareGeometryChange()
-            self.record["size"] = float(new_size)
-            self.update()
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if self._resizing:
-            self._resizing = False
-            self._resize_corner = None
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def refresh_from_record(self):
-        self.prepareGeometryChange()
-        self.update()
-
-
 class PDFView(GraphicsView):
     page_changed = Signal(int)
     visible_region_changed = Signal()
     annotation_clicked = Signal(int, QPointF)
     annotation_edit_requested = Signal(object)
-    annotation_selected = Signal(object)
-    undo_available_changed = Signal(bool)
-    redo_available_changed = Signal(bool)
 
     PAGE_MARGIN = 20.0
     PREFETCH_VIEWPORTS = 0.65
@@ -204,20 +72,9 @@ class PDFView(GraphicsView):
         self._annotation_records = []
         self._annotation_items = []
         self._annotation_dragging = False
-
-        # Annotation undo / redo uses complete lightweight record snapshots.
-        # This keeps every annotation type consistent and also covers move,
-        # resize, delete, text edits, and property-panel edits.
-        self._undo_stack = []
-        self._redo_stack = []
-        self._history_limit = 100
-        self._history_suspended = False
-        self._gesture_before = None
-        self._property_edit_before = None
-        self._property_edit_timer = QTimer(self)
-        self._property_edit_timer.setSingleShot(True)
-        self._property_edit_timer.setInterval(400)
-        self._property_edit_timer.timeout.connect(self.finish_property_edit)
+        self._drag_annotation_item = None
+        self._drag_scene_start = None
+        self._drag_item_start = None
 
         self._visible_signal_timer = QTimer(self)
         self._visible_signal_timer.setSingleShot(True)
@@ -231,103 +88,8 @@ class PDFView(GraphicsView):
             self._schedule_visible_region_changed
         )
 
-    def _history_snapshot(self):
-        self._sync_annotation_records()
-        return deepcopy(self._annotation_records)
-
-    def _emit_history_state(self):
-        self.undo_available_changed.emit(bool(self._undo_stack))
-        self.redo_available_changed.emit(bool(self._redo_stack))
-
-    def _commit_history_change(self, before):
-        if self._history_suspended or before is None:
-            return
-        after = self._history_snapshot()
-        if before == after:
-            return
-        self._undo_stack.append(deepcopy(before))
-        if len(self._undo_stack) > self._history_limit:
-            self._undo_stack.pop(0)
-        self._redo_stack.clear()
-        self._emit_history_state()
-
-    def reset_annotation_history(self):
-        self._property_edit_timer.stop()
-        self._gesture_before = None
-        self._property_edit_before = None
-        self._undo_stack.clear()
-        self._redo_stack.clear()
-        self._emit_history_state()
-
-    def _restore_history_snapshot(self, snapshot):
-        self._history_suspended = True
-        try:
-            self._annotation_records = deepcopy(snapshot)
-            self.scene.clearSelection()
-            self._restore_annotation_items()
-        finally:
-            self._history_suspended = False
-        self.annotation_selected.emit(None)
-
-    def finish_property_edit(self):
-        before = self._property_edit_before
-        self._property_edit_before = None
-        self._commit_history_change(before)
-
-    def undo_annotations(self):
-        self.finish_property_edit()
-        if not self._undo_stack:
-            return
-        current = self._history_snapshot()
-        target = self._undo_stack.pop()
-        self._redo_stack.append(current)
-        self._restore_history_snapshot(target)
-        self._emit_history_state()
-
-    def redo_annotations(self):
-        self.finish_property_edit()
-        if not self._redo_stack:
-            return
-        current = self._history_snapshot()
-        target = self._redo_stack.pop()
-        self._undo_stack.append(current)
-        self._restore_history_snapshot(target)
-        self._emit_history_state()
-
-    def update_annotation_record(self, item, changes, merge_property_edits=False):
-        if item is None or item.scene() is None:
-            return
-        if merge_property_edits:
-            if self._property_edit_before is None:
-                self._property_edit_before = self._history_snapshot()
-            item.record.update(changes)
-            if hasattr(item, "refresh_from_record"):
-                item.refresh_from_record()
-            self._property_edit_timer.start()
-            return
-        before = self._history_snapshot()
-        item.record.update(changes)
-        if hasattr(item, "setPlainText") and "text" in changes:
-            item.setPlainText(str(changes["text"]))
-        if hasattr(item, "refresh_from_record"):
-            item.refresh_from_record()
-        self._commit_history_change(before)
-
-    def remove_annotation_item(self, item):
-        if item is None or not hasattr(item, "record"):
-            return
-        before = self._history_snapshot()
-        record = item.record
-        if record in self._annotation_records:
-            self._annotation_records.remove(record)
-        if item in self._annotation_items:
-            self._annotation_items.remove(item)
-        if item.scene() is self.scene:
-            self.scene.removeItem(item)
-        self._commit_history_change(before)
-
     def set_annotation_mode(self, mode):
-        if mode not in {"hand", "check", "comment", "date_stamp"}:
+        if mode not in {"hand", "check", "comment"}:
             mode = "hand"
         self.annotation_mode = mode
         cursor = (
@@ -354,7 +116,6 @@ class PDFView(GraphicsView):
         return None
 
     def add_check_overlay(self, page_index, point):
-        before = self._history_snapshot()
         record = {
             "type": "check",
             "page_index": int(page_index),
@@ -364,10 +125,8 @@ class PDFView(GraphicsView):
         }
         self._annotation_records.append(record)
         self._create_annotation_item(record)
-        self._commit_history_change(before)
 
     def add_text_overlay(self, page_index, point, text):
-        before = self._history_snapshot()
         record = {
             "type": "text",
             "page_index": int(page_index),
@@ -380,47 +139,19 @@ class PDFView(GraphicsView):
             return
         self._annotation_records.append(record)
         self._create_annotation_item(record)
-        self._commit_history_change(before)
-
-    def add_date_stamp_overlay(self, page_index, point, settings):
-        before = self._history_snapshot()
-        record = {
-            "type": "date_stamp",
-            "page_index": int(page_index),
-            "x": float(point.x()),
-            "y": float(point.y()),
-            "top": str(settings.get("top", "検図")),
-            "date": str(settings.get("date", "")),
-            "bottom": str(settings.get("bottom", "")),
-            "color": str(settings.get("color", "black")),
-            "size": float(settings.get("size", 72.0)),
-            "line_width": float(settings.get("line_width", 1.5)),
-        }
-        self._annotation_records.append(record)
-        item = self._create_annotation_item(record)
-        if item is not None:
-            self.scene.clearSelection()
-            item.setSelected(True)
-            self.annotation_selected.emit(item)
-        self._commit_history_change(before)
-        return item
 
     def _create_annotation_item(self, record):
         origin = self._page_origins.get(record["page_index"])
         if origin is None:
             return
-        if record["type"] == "check":
-            item = CheckAnnotationItem(record)
-        elif record["type"] == "text":
-            item = TextAnnotationItem(record)
-        elif record["type"] == "date_stamp":
-            item = DateStampItem(record)
-        else:
-            return None
+        item = (
+            CheckAnnotationItem(record)
+            if record["type"] == "check"
+            else TextAnnotationItem(record)
+        )
         item.setPos(origin[0] + record["x"], origin[1] + record["y"])
         self.scene.addItem(item)
         self._annotation_items.append(item)
-        return item
 
     def _sync_annotation_records(self):
         for item in list(self._annotation_items):
@@ -450,7 +181,6 @@ class PDFView(GraphicsView):
     def clear_pending_annotations(self):
         self._remove_annotation_items()
         self._annotation_records.clear()
-        self.reset_annotation_history()
 
     def delete_selected_annotations(self):
         selected = [
@@ -458,9 +188,6 @@ class PDFView(GraphicsView):
             for item in self.scene.selectedItems()
             if hasattr(item, "record")
         ]
-        if not selected:
-            return
-        before = self._history_snapshot()
         for item in selected:
             record = item.record
             if record in self._annotation_records:
@@ -468,44 +195,61 @@ class PDFView(GraphicsView):
             if item in self._annotation_items:
                 self._annotation_items.remove(item)
             self.scene.removeItem(item)
-        self.annotation_selected.emit(None)
-        self._commit_history_change(before)
 
     def _annotation_item_near(self, viewport_pos, radius=10):
-        direct = self.itemAt(viewport_pos)
-        item = direct
-        while item is not None:
-            if hasattr(item, "record"):
-                return item
-            item = item.parentItem()
+        best_item = None
+        best_distance = None
 
-        scene_pos = self.mapToScene(viewport_pos)
-        search_rect = QRectF(
-            scene_pos.x() - radius / max(self.zoom_factor, 0.01),
-            scene_pos.y() - radius / max(self.zoom_factor, 0.01),
-            radius * 2 / max(self.zoom_factor, 0.01),
-            radius * 2 / max(self.zoom_factor, 0.01),
+        for item in self._annotation_items:
+            if item.scene() is not self.scene:
+                continue
+
+            viewport_rect = self.mapFromScene(
+                item.sceneBoundingRect()
+            ).boundingRect()
+            expanded = viewport_rect.adjusted(
+                -radius,
+                -radius,
+                radius,
+                radius,
+            )
+            if not expanded.contains(viewport_pos):
+                continue
+
+            center = viewport_rect.center()
+            dx = center.x() - viewport_pos.x()
+            dy = center.y() - viewport_pos.y()
+            distance = dx * dx + dy * dy
+            if best_distance is None or distance < best_distance:
+                best_item = item
+                best_distance = distance
+
+        return best_item
+
+    def _begin_annotation_drag(self, item, event):
+        self.scene.clearSelection()
+        item.setSelected(True)
+        self._annotation_dragging = True
+        self._drag_annotation_item = item
+        self._drag_scene_start = self.mapToScene(
+            event.position().toPoint()
         )
-        candidates = [
-            item for item in self.scene.items(search_rect)
-            if hasattr(item, "record")
-        ]
-        return candidates[0] if candidates else None
+        self._drag_item_start = QPointF(item.pos())
+        event.accept()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(event.position().toPoint())
+            nearby = self._annotation_item_near(
+                event.position().toPoint()
+            )
             if nearby is not None:
-                self.finish_property_edit()
-                self._gesture_before = self._history_snapshot()
-                self.scene.clearSelection()
-                nearby.setSelected(True)
-                self.annotation_selected.emit(nearby)
-                QGraphicsView.mousePressEvent(self, event)
+                self._begin_annotation_drag(nearby, event)
                 return
 
             if self.annotation_mode != "hand":
-                hit = self._page_point_at(self.mapToScene(event.position().toPoint()))
+                hit = self._page_point_at(
+                    self.mapToScene(event.position().toPoint())
+                )
                 if hit is not None:
                     self.annotation_clicked.emit(hit[0], hit[1])
                 event.accept()
@@ -513,34 +257,49 @@ class PDFView(GraphicsView):
 
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if (
+            self._annotation_dragging
+            and self._drag_annotation_item is not None
+        ):
+            current = self.mapToScene(event.position().toPoint())
+            delta = current - self._drag_scene_start
+            self._drag_annotation_item.setPos(
+                self._drag_item_start + delta
+            )
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        QGraphicsView.mouseReleaseEvent(self, event) if self.scene.selectedItems() else super().mouseReleaseEvent(event)
-        self._sync_annotation_records()
-        before = self._gesture_before
-        self._gesture_before = None
-        self._commit_history_change(before)
+        if (
+            self._annotation_dragging
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._sync_annotation_records()
+            self._annotation_dragging = False
+            self._drag_annotation_item = None
+            self._drag_scene_start = None
+            self._drag_item_start = None
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(event.position().toPoint())
-            if nearby is not None and nearby.record.get("type") in {"text", "date_stamp"}:
-                self.scene.clearSelection()
-                nearby.setSelected(True)
-                self.annotation_selected.emit(nearby)
+            nearby = self._annotation_item_near(
+                event.position().toPoint()
+            )
+            if isinstance(nearby, TextAnnotationItem):
                 self.annotation_edit_requested.emit(nearby)
                 event.accept()
                 return
+
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event):
-        if event.matches(QKeySequence.StandardKey.Undo):
-            self.undo_annotations()
-            event.accept()
-            return
-        if event.matches(QKeySequence.StandardKey.Redo):
-            self.redo_annotations()
-            event.accept()
-            return
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
             self.delete_selected_annotations()
             event.accept()

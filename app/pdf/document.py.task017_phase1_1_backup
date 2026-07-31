@@ -122,35 +122,134 @@ class PDFDocument:
         page = self.get_page(page_index)
         if page is None:
             return None
+
         size = max(float(size), 6.0)
         display_points = [
             (x - size * 0.48, y),
             (x - size * 0.12, y + size * 0.38),
             (x + size * 0.55, y - size * 0.48),
         ]
-        points = [
-            self._display_point_to_pdf(page, px, py)
-            for px, py in display_points
-        ]
+        points = []
+        for px, py in display_points:
+            point = self._display_point_to_pdf(page, px, py)
+            points.append((float(point.x), float(point.y)))
+
         annot = page.add_ink_annot([points])
         annot.set_colors(stroke=(1.0, 0.0, 0.0))
         annot.set_border(width=2.0)
-        annot.set_info(title="PDFInspector", subject="チェック", content="チェック")
+        annot.set_info(
+            title="PDFInspector",
+            subject="チェック",
+            content="チェック",
+        )
         annot.update()
         return annot
 
-    def add_comment(self, page_index, x, y, text):
+    def add_freetext_comment(
+        self,
+        page_index,
+        x,
+        y,
+        text,
+        font_size=11.0,
+    ):
         page = self.get_page(page_index)
         if page is None:
             return None
+
         content = str(text).strip()
         if not content:
             return None
+
         point = self._display_point_to_pdf(page, x, y)
-        annot = page.add_text_annot(point, content)
-        annot.set_info(title="PDFInspector", subject="コメント", content=content)
+        lines = content.splitlines() or [content]
+        longest = max(len(line) for line in lines)
+        width = max(90.0, longest * float(font_size) * 0.72 + 14.0)
+        height = max(24.0, len(lines) * float(font_size) * 1.55 + 10.0)
+        rect = fitz.Rect(
+            point.x,
+            point.y,
+            point.x + width,
+            point.y + height,
+        )
+        annot = page.add_freetext_annot(
+            rect,
+            content,
+            fontsize=float(font_size),
+            fontname="helv",
+            text_color=(1.0, 0.0, 0.0),
+            fill_color=None,
+            border_color=None,
+            align=0,
+        )
+        annot.set_info(
+            title="PDFInspector",
+            subject="コメント",
+            content=content,
+        )
         annot.update()
         return annot
+
+    def add_date_stamp(
+        self,
+        page_index,
+        x,
+        y,
+        top,
+        date_text,
+        bottom,
+        color="black",
+        size=72.0,
+        line_width=1.5,
+    ):
+        page = self.get_page(page_index)
+        if page is None:
+            return
+
+        center = self._display_point_to_pdf(page, x, y)
+        size = max(float(size), 42.0)
+        radius = size / 2.0
+        rgb = {
+            "black": (0.0, 0.0, 0.0),
+            "blue": (0.0, 0.27, 0.86),
+            "red": (0.86, 0.0, 0.0),
+        }.get(color, (0.0, 0.0, 0.0))
+
+        shape = page.new_shape()
+        shape.draw_circle(center, radius)
+        y1 = center.y - radius + size * 0.34
+        y2 = center.y - radius + size * 0.66
+        shape.draw_line((center.x - radius, y1), (center.x + radius, y1))
+        shape.draw_line((center.x - radius, y2), (center.x + radius, y2))
+        shape.finish(color=rgb, width=max(float(line_width), 0.5))
+        shape.commit()
+
+        font_size = max(6.0, size * 0.13)
+        text_rects = [
+            fitz.Rect(center.x - radius, center.y - radius, center.x + radius, y1),
+            fitz.Rect(center.x - radius, y1, center.x + radius, y2),
+            fitz.Rect(center.x - radius, y2, center.x + radius, center.y + radius),
+        ]
+        values = [str(top), str(date_text), str(bottom)]
+        for rect, value in zip(text_rects, values):
+            try:
+                page.insert_textbox(
+                    rect,
+                    value,
+                    fontsize=font_size,
+                    fontname="japan",
+                    color=rgb,
+                    align=fitz.TEXT_ALIGN_CENTER,
+                )
+            except Exception:
+                page.insert_textbox(
+                    rect,
+                    value,
+                    fontsize=font_size,
+                    fontname="helv",
+                    color=rgb,
+                    align=fitz.TEXT_ALIGN_CENTER,
+                )
 
     def rotate_page(self, index, angle):
         if self.doc is None:

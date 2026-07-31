@@ -1,5 +1,7 @@
 import fitz
 
+from app.annotations.date_stamp import render_date_stamp_png
+
 
 class PDFDocumentError(Exception):
     """PDF操作に失敗したときの基底例外。"""
@@ -189,6 +191,43 @@ class PDFDocument:
         )
         annot.update()
         return annot
+
+    def add_date_stamp(
+        self,
+        page_index,
+        x,
+        y,
+        top,
+        date_text,
+        bottom,
+        color="black",
+        size=72.0,
+        line_width=1.5,
+    ):
+        page = self.get_page(page_index)
+        if page is None:
+            return None
+
+        center = self._display_point_to_pdf(page, x, y)
+        size = max(float(size), 42.0)
+        half = size / 2.0
+        rect = fitz.Rect(
+            center.x - half,
+            center.y - half,
+            center.x + half,
+            center.y + half,
+        )
+        record = {
+            "top": str(top),
+            "date": str(date_text),
+            "bottom": str(bottom),
+            "color": str(color),
+            "size": size,
+            "line_width": float(line_width),
+        }
+        png = render_date_stamp_png(record, scale=4.0)
+        page.insert_image(rect, stream=png, overlay=True, keep_proportion=True)
+        return rect
 
     def rotate_page(self, index, angle):
         if self.doc is None:
