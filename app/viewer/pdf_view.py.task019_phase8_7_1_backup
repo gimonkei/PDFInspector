@@ -1327,18 +1327,7 @@ class PDFView(GraphicsView):
             "z": 10000.0,
         }
         item = DateStampItem(record)
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
-            False,
-        )
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
-            False,
-        )
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
-            False,
-        )
+        item.setFlags(QGraphicsItem.GraphicsItemFlag.NoItemFlags)
         item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         item.setOpacity(0.45)
         item.setPos(origin[0] + record["x"], origin[1] + record["y"])

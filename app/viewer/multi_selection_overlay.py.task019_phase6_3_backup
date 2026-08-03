@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
+
+
+class MultiSelectionOverlay(QGraphicsObject):
+    """
+    Visual-only overlay for multiple selected annotations.
+
+    Every selected annotation receives a blue dashed rectangle. When two or
+    more items are selected, a stronger group rectangle surrounds them all.
+    The overlay never accepts mouse events, so normal annotation editing and
+    dragging continue to work unchanged.
+    """
+
+    PADDING_PIXELS = 4.0
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+        self._item_rects = []
+        self._group_rect = QRectF()
+
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIsFocusable,
+            False,
+        )
+        self.setZValue(9990.0)
+        self.setVisible(False)
+
+    def _scene_units(self, pixels):
+        scale = abs(float(self.view.transform().m11()))
+        if scale < 1e-6:
+            scale = 1.0
+        return float(pixels) / scale
+
+    def clear(self):
+        self.prepareGeometryChange()
+        self._item_rects = []
+        self._group_rect = QRectF()
+        self.setVisible(False)
+        self.update()
+
+    def set_items(self, items):
+        valid = [
+            item
+            for item in items
+            if item is not None and item.scene() is not None
+        ]
+
+        self.prepareGeometryChange()
+        self._item_rects = []
+
+        if len(valid) < 2:
+            self._group_rect = QRectF()
+            self.setVisible(False)
+            self.update()
+            return
+
+        padding = self._scene_units(self.PADDING_PIXELS)
+        group = QRectF()
+
+        for item in valid:
+            rect = item.sceneBoundingRect().normalized()
+            rect = rect.adjusted(
+                -padding,
+                -padding,
+                padding,
+                padding,
+            )
+            self._item_rects.append(rect)
+            group = rect if group.isNull() else group.united(rect)
+
+        self._group_rect = group
+        self.setVisible(True)
+        self.update()
+
+    def refresh(self):
+        scene = self.scene()
+        if scene is None:
+            self.clear()
+            return
+
+        try:
+            selected = [
+                item
+                for item in scene.selectedItems()
+                if hasattr(item, "record")
+            ]
+        except RuntimeError:
+            self.clear()
+            return
+
+        self.set_items(selected)
+
+    def boundingRect(self):
+        if not self.isVisible() or self._group_rect.isNull():
+            return QRectF()
+
+        pad = self._scene_units(3.0)
+        return self._group_rect.adjusted(
+            -pad,
+            -pad,
+            pad,
+            pad,
+        )
+
+    def paint(self, painter, option, widget=None):
+        if len(self._item_rects) < 2:
+            return
+
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing,
+            True,
+        )
+
+        item_pen = QPen(
+            QColor(50, 135, 235, 210),
+            1.0,
+            Qt.PenStyle.DashLine,
+        )
+        item_pen.setCosmetic(True)
+        painter.setPen(item_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        for rect in self._item_rects:
+            painter.drawRect(rect)
+
+        group_pen = QPen(
+            QColor(20, 100, 220, 235),
+            2.0,
+            Qt.PenStyle.DashDotLine,
+        )
+        group_pen.setCosmetic(True)
+        painter.setPen(group_pen)
+        painter.drawRect(self._group_rect)

@@ -596,28 +596,6 @@ class AnnotationPropertiesPanel(QWidget):
                 value = float(self.record.get("size", 72.0))
                 if abs(self.size_spin.value() - value) > 0.05:
                     self.size_spin.setValue(value)
-                    self.main_window._remember_annotation_defaults(
-                        "date_stamp",
-                        {
-                            "top": str(
-                                self.record.get("top", "検図")
-                            ),
-                            "bottom": str(
-                                self.record.get("bottom", "松井")
-                            ),
-                            "color": self.record.get(
-                                "color",
-                                "black",
-                            ),
-                            "size": value,
-                            "line_width": float(
-                                self.record.get(
-                                    "line_width",
-                                    1.5,
-                                )
-                            ),
-                        },
-                    )
         finally:
             self._loading = False
 
@@ -794,17 +772,6 @@ class AnnotationPropertiesPanel(QWidget):
             view._refresh_selection_overlay()
             view._commit_history_change(before)
 
-            self.main_window._remember_annotation_defaults(
-                "date_stamp",
-                {
-                    "top": record["top"],
-                    "bottom": record["bottom"],
-                    "color": record["color"],
-                    "size": record["size"],
-                    "line_width": record["line_width"],
-                },
-            )
-
         # Keep the current editor widgets in place. Rebuilding the panel
         # after every value change causes visible flicker and width movement.
 
@@ -893,13 +860,6 @@ class MainWindow(QMainWindow):
             "arrow": {
                 "color": "#dc0000",
                 "line_width": 2.0,
-            },
-            "date_stamp": {
-                "top": "検図",
-                "bottom": "松井",
-                "color": "black",
-                "size": 72.0,
-                "line_width": 1.5,
             },
             "rectangle": {
                 "color": "#dc0000",
@@ -1376,30 +1336,6 @@ class MainWindow(QMainWindow):
         self.stamp_line_spin.setValue(1.5)
         self.stamp_line_spin.setSuffix(" pt")
 
-        memory = self._annotation_defaults.get(
-            "date_stamp",
-            {},
-        )
-        self.stamp_top_edit.setText(
-            str(memory.get("top", "検図"))
-        )
-        self.stamp_bottom_edit.setText(
-            str(memory.get("bottom", "松井"))
-        )
-        memory_color = str(memory.get("color", "black"))
-        memory_color_index = self.stamp_color_combo.findData(
-            memory_color
-        )
-        self.stamp_color_combo.setCurrentIndex(
-            max(0, memory_color_index)
-        )
-        self.stamp_size_spin.setValue(
-            round(float(memory.get("size", 72.0)))
-        )
-        self.stamp_line_spin.setValue(
-            float(memory.get("line_width", 1.5))
-        )
-
         form.addRow("テンプレート", self.stamp_template_combo)
         form.addRow("", template_widget)
         form.addRow("上段", self.stamp_top_edit)
@@ -1524,8 +1460,7 @@ class MainWindow(QMainWindow):
     def current_date_stamp_settings(self):
         today_text = date.today().strftime("'%y/%m/%d")
         self.stamp_date_edit.setText(today_text)
-
-        settings = {
+        return {
             "top": self.stamp_top_edit.text().strip(),
             "date": today_text,
             "bottom": self.stamp_bottom_edit.text().strip(),
@@ -1533,21 +1468,8 @@ class MainWindow(QMainWindow):
             "size": float(self.stamp_size_spin.value()),
             "line_width": float(self.stamp_line_spin.value()),
         }
-        self._remember_annotation_defaults(
-            "date_stamp",
-            {
-                key: value
-                for key, value in settings.items()
-                if key != "date"
-            },
-        )
-        return settings
 
     def set_annotation_mode(self, mode):
-        if mode == "date_stamp":
-            self.view.set_date_stamp_preview_settings(
-                self.current_date_stamp_settings()
-            )
         self.view.set_annotation_mode(mode)
 
 
@@ -1586,34 +1508,18 @@ class MainWindow(QMainWindow):
 
 
     def update_selected_date_stamp(self):
-        memory_values = {
-            "top": self.stamp_top_edit.text().strip(),
-            "bottom": self.stamp_bottom_edit.text().strip(),
-            "color": self.stamp_color_combo.currentData(),
-            "size": float(self.stamp_size_spin.value()),
-            "line_width": float(self.stamp_line_spin.value()),
-        }
-        self._remember_annotation_defaults(
-            "date_stamp",
-            memory_values,
-        )
-
-        preview_settings = dict(memory_values)
-        preview_settings["date"] = (
-            self.stamp_date_edit.text().strip()
-            or date.today().strftime("'%y/%m/%d")
-        )
-        self.view.set_date_stamp_preview_settings(preview_settings)
-
         item = self.selected_date_stamp_item
         if item is None or item.scene() is None:
             return
-
         self.view.update_annotation_record(
             item,
             {
-                **memory_values,
+                "top": self.stamp_top_edit.text().strip(),
                 "date": self.stamp_date_edit.text().strip(),
+                "bottom": self.stamp_bottom_edit.text().strip(),
+                "color": self.stamp_color_combo.currentData(),
+                "size": float(self.stamp_size_spin.value()),
+                "line_width": float(self.stamp_line_spin.value()),
             },
             merge_property_edits=True,
         )

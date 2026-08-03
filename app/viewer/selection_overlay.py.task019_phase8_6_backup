@@ -73,7 +73,7 @@ class SelectionOverlay(QGraphicsObject):
                 self.target._stamp_rect()
             )
             self._set_corner_handles()
-        elif record_type in {"rectangle", "ellipse"} and hasattr(
+        elif record_type in {"rectangle", "ellipse", "cloud"} and hasattr(
             self.target,
             "_rect",
         ):
@@ -240,7 +240,7 @@ class SelectionOverlay(QGraphicsObject):
             self._resize_arrow(current)
         elif record_type == "date_stamp":
             self._resize_date_stamp(current)
-        elif record_type in {"rectangle", "ellipse"}:
+        elif record_type in {"rectangle", "ellipse", "cloud"}:
             self._resize_shape(current)
 
         self.view._sync_annotation_records()

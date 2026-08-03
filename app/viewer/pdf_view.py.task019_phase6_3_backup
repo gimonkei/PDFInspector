@@ -80,7 +80,7 @@ class TextAnnotationItem(QGraphicsTextItem):
 
 class DateStampItem(QGraphicsObject):
     HANDLE_SIZE = 8.0
-    MIN_SIZE = 24.0
+    MIN_SIZE = 42.0
 
     def __init__(self, record):
         super().__init__()
@@ -679,11 +679,6 @@ class PDFView(GraphicsView):
         self._shape_preview = None
         self._shape_kind = None
 
-        self._date_stamp_preview_settings = {}
-        self._date_stamp_preview_item = None
-        self._date_stamp_preview_page = None
-        self._date_stamp_preview_point = None
-
         self._annotation_defaults = {
             "check": {
                 "color": "#dc0000",
@@ -739,15 +734,6 @@ class PDFView(GraphicsView):
         self._ctrl_drag_started = False
         self._multi_drag_before = None
         self._multi_dragging = False
-        self._active_selection_item = None
-
-        self._ctrl_pending_item = None
-        self._ctrl_pending_start_scene = None
-        self._ctrl_pending_before = None
-        self._ctrl_pending_clones = []
-        self._ctrl_pending_clone_positions = []
-        self._ctrl_pending_dragging = False
-
         self._property_edit_timer = QTimer(self)
         self._property_edit_timer.setSingleShot(True)
         self._property_edit_timer.setInterval(400)
@@ -787,6 +773,7 @@ class PDFView(GraphicsView):
         )
 
     def _on_scene_selection_changed(self):
+        # Qt can emit this signal while the scene is being destroyed.
         try:
             scene = self.scene
             if scene is None:
@@ -804,7 +791,11 @@ class PDFView(GraphicsView):
         except RuntimeError:
             return
 
-        single_overlay = getattr(self, "_selection_overlay", None)
+        single_overlay = getattr(
+            self,
+            "_selection_overlay",
+            None,
+        )
         multi_overlay = getattr(
             self,
             "_multi_selection_overlay",
@@ -813,23 +804,19 @@ class PDFView(GraphicsView):
 
         try:
             if len(selected) == 1:
-                self._active_selection_item = selected[0]
                 if single_overlay is not None:
                     single_overlay.set_target(selected[0])
                 if multi_overlay is not None:
                     multi_overlay.clear()
             elif len(selected) > 1:
-                if self._active_selection_item not in selected:
-                    self._active_selection_item = selected[-1]
+                # A group selection uses its own visual overlay. Hiding the
+                # single-item handles prevents users mistaking one object for
+                # the only selected item.
                 if single_overlay is not None:
                     single_overlay.clear_target()
                 if multi_overlay is not None:
-                    multi_overlay.set_items(
-                        selected,
-                        self._active_selection_item,
-                    )
+                    multi_overlay.set_items(selected)
             else:
-                self._active_selection_item = None
                 if single_overlay is not None:
                     single_overlay.clear_target()
                 if multi_overlay is not None:
@@ -853,37 +840,30 @@ class PDFView(GraphicsView):
         )
 
         try:
-            selected = self._selected_annotation_items_sorted()
+            selected_count = len(
+                self._selected_annotation_items()
+            )
         except RuntimeError:
             return
 
         try:
-            if len(selected) == 1:
-                self._active_selection_item = selected[0]
+            if selected_count == 1:
                 if single_overlay is not None:
-                    single_overlay.set_target(selected[0])
                     single_overlay.refresh_geometry()
                 if multi_overlay is not None:
                     multi_overlay.clear()
-            elif len(selected) > 1:
-                if self._active_selection_item not in selected:
-                    self._active_selection_item = selected[-1]
+            elif selected_count > 1:
                 if single_overlay is not None:
                     single_overlay.clear_target()
                 if multi_overlay is not None:
-                    multi_overlay.set_items(
-                        selected,
-                        self._active_selection_item,
-                    )
+                    multi_overlay.refresh()
             else:
-                self._active_selection_item = None
                 if single_overlay is not None:
                     single_overlay.clear_target()
                 if multi_overlay is not None:
                     multi_overlay.clear()
         except RuntimeError:
             return
-
 
     def _detach_selection_overlay(self):
         if (
@@ -920,111 +900,6 @@ class PDFView(GraphicsView):
 
 
 
-
-    def _clear_ctrl_pending(self):
-        self._ctrl_pending_item = None
-        self._ctrl_pending_start_scene = None
-        self._ctrl_pending_before = None
-        self._ctrl_pending_clones = []
-        self._ctrl_pending_clone_positions = []
-        self._ctrl_pending_dragging = False
-
-    def _begin_ctrl_pending(self, item, scene_point):
-        self._ctrl_pending_item = item
-        self._ctrl_pending_start_scene = QPointF(scene_point)
-        self._ctrl_pending_before = None
-        self._ctrl_pending_clones = []
-        self._ctrl_pending_clone_positions = []
-        self._ctrl_pending_dragging = False
-
-    def _ctrl_drag_threshold_scene(self):
-        scale = abs(float(self.transform().m11()))
-        if scale < 1e-6:
-            scale = 1.0
-        return 5.0 / scale
-
-    def _start_pending_ctrl_duplicate(self):
-        source = self._ctrl_pending_item
-        if source is None or not hasattr(source, "record"):
-            return False
-
-        self._sync_annotation_records()
-        selected = self._selected_annotation_items_sorted()
-        sources = (
-            selected
-            if source.isSelected() and len(selected) > 1
-            else [source]
-        )
-
-        self._ctrl_pending_before = self._history_snapshot()
-        self.scene.clearSelection()
-        clones = []
-
-        for item in sources:
-            record = self._clone_record(item.record)
-            self._annotation_records.append(record)
-            clone = self._create_annotation_item(record)
-            if clone is not None:
-                clone.setSelected(True)
-                clones.append(clone)
-
-        if not clones:
-            self._clear_ctrl_pending()
-            return False
-
-        self._ctrl_pending_clones = clones
-        self._ctrl_pending_clone_positions = [
-            QPointF(clone.pos()) for clone in clones
-        ]
-        self._ctrl_pending_dragging = True
-        self._active_selection_item = clones[-1]
-        self.annotation_selected.emit(clones[-1])
-        self._refresh_selection_overlay()
-        return True
-
-    def _move_pending_ctrl_duplicate(self, scene_point):
-        if not self._ctrl_pending_dragging:
-            return False
-
-        delta = QPointF(scene_point) - self._ctrl_pending_start_scene
-        for clone, start_pos in zip(
-            self._ctrl_pending_clones,
-            self._ctrl_pending_clone_positions,
-        ):
-            clone.setPos(start_pos + delta)
-
-        self._sync_annotation_records()
-        self._refresh_selection_overlay()
-        return True
-
-    def _finish_pending_ctrl(self):
-        item = self._ctrl_pending_item
-
-        if self._ctrl_pending_dragging:
-            before = self._ctrl_pending_before
-            self._sync_annotation_records()
-            self._clear_ctrl_pending()
-            self._commit_history_change(before)
-            return True
-
-        if item is not None:
-            item.setSelected(not item.isSelected())
-            selected = self._selected_annotation_items_sorted()
-            self._active_selection_item = (
-                item if item.isSelected()
-                else (selected[-1] if selected else None)
-            )
-            if self._active_selection_item is not None:
-                self.annotation_selected.emit(
-                    self._active_selection_item
-                )
-            self._refresh_selection_overlay()
-            self._clear_ctrl_pending()
-            return True
-
-        self._clear_ctrl_pending()
-        return False
-
     def _selected_annotation_items_sorted(self):
         return sorted(
             self._selected_annotation_items(),
@@ -1043,7 +918,6 @@ class PDFView(GraphicsView):
         if not selected:
             return False
 
-        self._active_selection_item = selected[-1]
         self.annotation_selected.emit(selected[-1])
         self._refresh_selection_overlay()
         return True
@@ -1289,87 +1163,7 @@ class PDFView(GraphicsView):
             self.scene.removeItem(item)
         self._commit_history_change(before)
 
-
-    def set_date_stamp_preview_settings(self, settings):
-        self._date_stamp_preview_settings = dict(settings or {})
-
-    def _remove_date_stamp_preview(self):
-        item = self._date_stamp_preview_item
-        self._date_stamp_preview_item = None
-        self._date_stamp_preview_page = None
-        self._date_stamp_preview_point = None
-        if item is None:
-            return
-        try:
-            if item.scene() is self.scene:
-                self.scene.removeItem(item)
-        except RuntimeError:
-            pass
-
-    def _start_date_stamp_preview(self, page_index, page_point):
-        self._remove_date_stamp_preview()
-        origin = self._page_origins.get(int(page_index))
-        if origin is None:
-            return False
-
-        settings = dict(self._date_stamp_preview_settings)
-        record = {
-            "type": "date_stamp",
-            "page_index": int(page_index),
-            "x": float(page_point.x()),
-            "y": float(page_point.y()),
-            "top": str(settings.get("top", "検図")),
-            "date": str(settings.get("date", "")),
-            "bottom": str(settings.get("bottom", "")),
-            "color": str(settings.get("color", "black")),
-            "size": float(settings.get("size", 72.0)),
-            "line_width": float(settings.get("line_width", 1.5)),
-            "z": 10000.0,
-        }
-        item = DateStampItem(record)
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
-            False,
-        )
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
-            False,
-        )
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
-            False,
-        )
-        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        item.setOpacity(0.45)
-        item.setPos(origin[0] + record["x"], origin[1] + record["y"])
-        item.setZValue(10000.0)
-        self.scene.addItem(item)
-
-        self._date_stamp_preview_item = item
-        self._date_stamp_preview_page = int(page_index)
-        self._date_stamp_preview_point = QPointF(page_point)
-        return True
-
-    def _move_date_stamp_preview(self, page_index, page_point):
-        item = self._date_stamp_preview_item
-        if item is None:
-            return False
-        origin = self._page_origins.get(int(page_index))
-        if origin is None:
-            return False
-
-        self._date_stamp_preview_page = int(page_index)
-        self._date_stamp_preview_point = QPointF(page_point)
-        item.record["page_index"] = int(page_index)
-        item.record["x"] = float(page_point.x())
-        item.record["y"] = float(page_point.y())
-        item.setPos(origin[0] + page_point.x(), origin[1] + page_point.y())
-        item.update()
-        return True
-
     def set_annotation_mode(self, mode):
-        if mode != "date_stamp":
-            self._remove_date_stamp_preview()
         if mode not in {"hand", "check", "comment", "date_stamp", "arrow", "rectangle", "ellipse", "cloud"}:
             mode = "hand"
         self.annotation_mode = mode
@@ -1521,16 +1315,12 @@ class PDFView(GraphicsView):
             item.setZValue(float(item.record.get("z", 20.0)))
 
     def change_selected_z_order(self, operation):
-        selected_items = self._selected_annotation_items_sorted()
-        if not selected_items:
-            return False
-
-        selected_records = [
-            item.record for item in selected_items
+        selected = [
+            item for item in self.scene.selectedItems()
+            if hasattr(item, "record")
         ]
-        selected_ids = {
-            id(record) for record in selected_records
-        }
+        if not selected:
+            return
 
         before = self._history_snapshot()
         ordered = sorted(
@@ -1538,59 +1328,25 @@ class PDFView(GraphicsView):
             key=lambda record: float(record.get("z", 20.0)),
         )
 
-        if operation == "front":
-            remaining = [
-                record
-                for record in ordered
-                if id(record) not in selected_ids
-            ]
-            ordered = remaining + selected_records
-
-        elif operation == "back":
-            remaining = [
-                record
-                for record in ordered
-                if id(record) not in selected_ids
-            ]
-            ordered = selected_records + remaining
-
-        elif operation == "forward":
-            for index in range(len(ordered) - 2, -1, -1):
-                current = ordered[index]
-                following = ordered[index + 1]
-                if (
-                    id(current) in selected_ids
-                    and id(following) not in selected_ids
-                ):
-                    ordered[index], ordered[index + 1] = (
-                        following,
-                        current,
-                    )
-
-        elif operation == "backward":
-            for index in range(1, len(ordered)):
-                current = ordered[index]
-                previous = ordered[index - 1]
-                if (
-                    id(current) in selected_ids
-                    and id(previous) not in selected_ids
-                ):
-                    ordered[index - 1], ordered[index] = (
-                        current,
-                        previous,
-                    )
-
-        else:
-            return False
+        for item in selected:
+            record = item.record
+            if record not in ordered:
+                continue
+            index = ordered.index(record)
+            ordered.pop(index)
+            if operation == "front":
+                ordered.append(record)
+            elif operation == "back":
+                ordered.insert(0, record)
+            elif operation == "forward":
+                ordered.insert(min(index + 1, len(ordered)), record)
+            elif operation == "backward":
+                ordered.insert(max(index - 1, 0), record)
 
         for index, record in enumerate(ordered):
             record["z"] = 20.0 + index
-
         self._normalize_annotation_z()
-        self._refresh_selection_overlay()
         self._commit_history_change(before)
-        return True
-
 
     def add_shape_overlay(
         self,
@@ -1686,8 +1442,6 @@ class PDFView(GraphicsView):
         text_color=None,
         border_color=None,
         line_width=None,
-        width=None,
-        height=None,
     ):
         record = getattr(item, "record", None)
         if not record or record.get("type") not in {"rectangle", "cloud"}:
@@ -1723,20 +1477,7 @@ class PDFView(GraphicsView):
         if border_color is not None:
             color = QColor(str(border_color))
             if color.isValid(): record["color"] = color.name(QColor.NameFormat.HexRgb)
-        if line_width is not None:
-            record["line_width"] = max(float(line_width), 0.5)
-
-        if width is not None:
-            record["width"] = max(
-                float(width),
-                ShapeAnnotationItem.MIN_SIZE,
-            )
-
-        if height is not None:
-            record["height"] = max(
-                float(height),
-                ShapeAnnotationItem.MIN_SIZE,
-            )
+        if line_width is not None: record["line_width"] = max(float(line_width), 0.5)
 
         if hasattr(item, "refresh_from_record"):
             item.refresh_from_record()
@@ -1806,7 +1547,6 @@ class PDFView(GraphicsView):
         return [dict(record) for record in self._annotation_records]
 
     def clear_pending_annotations(self):
-        self._remove_date_stamp_preview()
         self._remove_annotation_items()
         self._annotation_records.clear()
         self.reset_annotation_history()
@@ -1879,24 +1619,41 @@ class PDFView(GraphicsView):
                 self.finish_property_edit()
 
                 modifiers = event.modifiers()
+                shift_pressed = bool(
+                    modifiers
+                    & Qt.KeyboardModifier.ShiftModifier
+                )
                 ctrl_pressed = bool(
                     modifiers
                     & Qt.KeyboardModifier.ControlModifier
                 )
 
-                if ctrl_pressed:
-                    self._begin_ctrl_pending(
-                        nearby,
-                        scene_point,
-                    )
+                if shift_pressed:
+                    nearby.setSelected(not nearby.isSelected())
+                    selected = self._selected_annotation_items_sorted()
+                    if selected:
+                        self.annotation_selected.emit(selected[-1])
+                    self._refresh_selection_overlay()
                     event.accept()
                     return
+
+                selected_before = self._selected_annotation_items()
+
+                if ctrl_pressed:
+                    if nearby.isSelected() and len(selected_before) > 1:
+                        clones = self._duplicate_selected_for_ctrl_drag()
+                        if clones:
+                            QGraphicsView.mousePressEvent(self, event)
+                            return
+                    else:
+                        clone = self._begin_ctrl_drag_duplicate(nearby)
+                        if clone is not None:
+                            QGraphicsView.mousePressEvent(self, event)
+                            return
 
                 if not nearby.isSelected():
                     self.scene.clearSelection()
                     nearby.setSelected(True)
-
-                self._active_selection_item = nearby
 
                 if len(self._selected_annotation_items()) > 1:
                     self._begin_multi_drag()
@@ -1908,12 +1665,6 @@ class PDFView(GraphicsView):
                 return
 
             hit = self._page_point_at(scene_point)
-
-            if self.annotation_mode == "date_stamp" and hit is not None:
-                page_index, page_point = hit
-                if self._start_date_stamp_preview(page_index, page_point):
-                    event.accept()
-                    return
 
             if (
                 self.annotation_mode in {"rectangle", "ellipse", "cloud"}
@@ -1978,10 +1729,7 @@ class PDFView(GraphicsView):
                 event.accept()
                 return
 
-            if (
-                self.annotation_mode not in {"hand", "date_stamp"}
-                and hit is not None
-            ):
+            if self.annotation_mode != "hand" and hit is not None:
                 self.annotation_clicked.emit(hit[0], hit[1])
                 event.accept()
                 return
@@ -1989,35 +1737,6 @@ class PDFView(GraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._date_stamp_preview_item is not None:
-            hit = self._page_point_at(
-                self.mapToScene(event.position().toPoint())
-            )
-            if hit is not None:
-                self._move_date_stamp_preview(hit[0], hit[1])
-            event.accept()
-            return
-
-        if self._ctrl_pending_item is not None:
-            current = self.mapToScene(event.position().toPoint())
-            delta = current - self._ctrl_pending_start_scene
-
-            if (
-                not self._ctrl_pending_dragging
-                and (
-                    delta.x() * delta.x()
-                    + delta.y() * delta.y()
-                ) ** 0.5
-                >= self._ctrl_drag_threshold_scene()
-            ):
-                self._start_pending_ctrl_duplicate()
-
-            if self._ctrl_pending_dragging:
-                self._move_pending_ctrl_duplicate(current)
-
-            event.accept()
-            return
-
         if self._shape_drawing and self._shape_preview is not None:
             start_scene = self._shape_preview.rect().topLeft()
             current = self.mapToScene(event.position().toPoint())
@@ -2039,29 +1758,6 @@ class PDFView(GraphicsView):
         self._refresh_selection_overlay()
 
     def mouseReleaseEvent(self, event):
-        if (
-            self._date_stamp_preview_item is not None
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            page_index = self._date_stamp_preview_page
-            page_point = self._date_stamp_preview_point
-            self._remove_date_stamp_preview()
-            if page_index is not None and page_point is not None:
-                self.annotation_clicked.emit(
-                    int(page_index),
-                    QPointF(page_point),
-                )
-            event.accept()
-            return
-
-        if (
-            self._ctrl_pending_item is not None
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            self._finish_pending_ctrl()
-            event.accept()
-            return
-
         if (
             self._multi_dragging
             and event.button() == Qt.MouseButton.LeftButton
@@ -2177,82 +1873,33 @@ class PDFView(GraphicsView):
 
     def contextMenuEvent(self, event):
         nearby = self._annotation_item_near(event.pos())
-
-        if nearby is not None:
-            if not nearby.isSelected():
-                self.scene.clearSelection()
-                nearby.setSelected(True)
-
-            self._active_selection_item = nearby
-            self.annotation_selected.emit(nearby)
-            self._refresh_selection_overlay()
-
-        selected_items = self._selected_annotation_items_sorted()
-        has_selection = bool(selected_items)
-        has_clipboard = bool(self._annotation_clipboard)
-
-        menu = QMenu(self)
-
-        copy_action = menu.addAction("コピー\tCtrl+C")
-        copy_action.setEnabled(has_selection)
-
-        paste_action = menu.addAction("貼り付け\tCtrl+V")
-        paste_action.setEnabled(has_clipboard)
-
-        duplicate_action = menu.addAction("複製")
-        duplicate_action.setEnabled(has_selection)
-
-        menu.addSeparator()
-
-        order_menu = menu.addMenu("重なり順")
-        front_action = order_menu.addAction("最前面へ")
-        forward_action = order_menu.addAction("前面へ")
-        backward_action = order_menu.addAction("背面へ")
-        back_action = order_menu.addAction("最背面へ")
-        order_menu.setEnabled(has_selection)
-
-        menu.addSeparator()
-
-        properties_action = menu.addAction("プロパティ")
-        properties_action.setEnabled(
-            has_selection and len(selected_items) == 1
-        )
-
-        delete_action = menu.addAction("削除\tDelete")
-        delete_action.setEnabled(has_selection)
-
-        selected_action = menu.exec(event.globalPos())
-        if selected_action is None:
+        if nearby is None:
+            super().contextMenuEvent(event)
             return
 
-        if selected_action is copy_action:
-            self.copy_selected_annotations()
+        self.scene.clearSelection()
+        nearby.setSelected(True)
+        self.annotation_selected.emit(nearby)
 
-        elif selected_action is paste_action:
-            self.paste_annotations()
+        menu = QMenu(self)
+        front_action = menu.addAction("最前面へ")
+        forward_action = menu.addAction("前面へ")
+        menu.addSeparator()
+        backward_action = menu.addAction("背面へ")
+        back_action = menu.addAction("最背面へ")
+        menu.addSeparator()
+        delete_action = menu.addAction("削除")
 
-        elif selected_action is duplicate_action:
-            if self.copy_selected_annotations():
-                self.paste_annotations()
-
-        elif selected_action is front_action:
+        selected = menu.exec(event.globalPos())
+        if selected is front_action:
             self.change_selected_z_order("front")
-
-        elif selected_action is forward_action:
+        elif selected is forward_action:
             self.change_selected_z_order("forward")
-
-        elif selected_action is backward_action:
+        elif selected is backward_action:
             self.change_selected_z_order("backward")
-
-        elif selected_action is back_action:
+        elif selected is back_action:
             self.change_selected_z_order("back")
-
-        elif selected_action is properties_action:
-            self.annotation_edit_requested.emit(
-                selected_items[-1]
-            )
-
-        elif selected_action is delete_action:
+        elif selected is delete_action:
             self.delete_selected_annotations()
 
 
@@ -2294,14 +1941,6 @@ class PDFView(GraphicsView):
         return True
 
     def _cancel_active_gesture(self):
-        if self._ctrl_pending_item is not None:
-            before = self._ctrl_pending_before
-            was_dragging = self._ctrl_pending_dragging
-            self._clear_ctrl_pending()
-            if was_dragging and before is not None:
-                self._restore_history_snapshot(before)
-            return True
-
         if self._ctrl_drag_started:
             before = self._gesture_before
             self._gesture_before = None
@@ -2340,18 +1979,12 @@ class PDFView(GraphicsView):
             return False
 
         self.scene.clearSelection()
-        self._active_selection_item = None
         self._refresh_selection_overlay()
         self.selection_count_changed.emit(0)
         return True
 
-
     def cancel_current_operation(self):
         self.finish_property_edit()
-
-        if self._date_stamp_preview_item is not None:
-            self._remove_date_stamp_preview()
-            return True
 
         if self._cancel_shape_drawing():
             return True

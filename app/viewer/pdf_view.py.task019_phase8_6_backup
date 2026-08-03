@@ -679,11 +679,6 @@ class PDFView(GraphicsView):
         self._shape_preview = None
         self._shape_kind = None
 
-        self._date_stamp_preview_settings = {}
-        self._date_stamp_preview_item = None
-        self._date_stamp_preview_page = None
-        self._date_stamp_preview_point = None
-
         self._annotation_defaults = {
             "check": {
                 "color": "#dc0000",
@@ -1289,87 +1284,7 @@ class PDFView(GraphicsView):
             self.scene.removeItem(item)
         self._commit_history_change(before)
 
-
-    def set_date_stamp_preview_settings(self, settings):
-        self._date_stamp_preview_settings = dict(settings or {})
-
-    def _remove_date_stamp_preview(self):
-        item = self._date_stamp_preview_item
-        self._date_stamp_preview_item = None
-        self._date_stamp_preview_page = None
-        self._date_stamp_preview_point = None
-        if item is None:
-            return
-        try:
-            if item.scene() is self.scene:
-                self.scene.removeItem(item)
-        except RuntimeError:
-            pass
-
-    def _start_date_stamp_preview(self, page_index, page_point):
-        self._remove_date_stamp_preview()
-        origin = self._page_origins.get(int(page_index))
-        if origin is None:
-            return False
-
-        settings = dict(self._date_stamp_preview_settings)
-        record = {
-            "type": "date_stamp",
-            "page_index": int(page_index),
-            "x": float(page_point.x()),
-            "y": float(page_point.y()),
-            "top": str(settings.get("top", "検図")),
-            "date": str(settings.get("date", "")),
-            "bottom": str(settings.get("bottom", "")),
-            "color": str(settings.get("color", "black")),
-            "size": float(settings.get("size", 72.0)),
-            "line_width": float(settings.get("line_width", 1.5)),
-            "z": 10000.0,
-        }
-        item = DateStampItem(record)
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
-            False,
-        )
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
-            False,
-        )
-        item.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
-            False,
-        )
-        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        item.setOpacity(0.45)
-        item.setPos(origin[0] + record["x"], origin[1] + record["y"])
-        item.setZValue(10000.0)
-        self.scene.addItem(item)
-
-        self._date_stamp_preview_item = item
-        self._date_stamp_preview_page = int(page_index)
-        self._date_stamp_preview_point = QPointF(page_point)
-        return True
-
-    def _move_date_stamp_preview(self, page_index, page_point):
-        item = self._date_stamp_preview_item
-        if item is None:
-            return False
-        origin = self._page_origins.get(int(page_index))
-        if origin is None:
-            return False
-
-        self._date_stamp_preview_page = int(page_index)
-        self._date_stamp_preview_point = QPointF(page_point)
-        item.record["page_index"] = int(page_index)
-        item.record["x"] = float(page_point.x())
-        item.record["y"] = float(page_point.y())
-        item.setPos(origin[0] + page_point.x(), origin[1] + page_point.y())
-        item.update()
-        return True
-
     def set_annotation_mode(self, mode):
-        if mode != "date_stamp":
-            self._remove_date_stamp_preview()
         if mode not in {"hand", "check", "comment", "date_stamp", "arrow", "rectangle", "ellipse", "cloud"}:
             mode = "hand"
         self.annotation_mode = mode
@@ -1806,7 +1721,6 @@ class PDFView(GraphicsView):
         return [dict(record) for record in self._annotation_records]
 
     def clear_pending_annotations(self):
-        self._remove_date_stamp_preview()
         self._remove_annotation_items()
         self._annotation_records.clear()
         self.reset_annotation_history()
@@ -1909,12 +1823,6 @@ class PDFView(GraphicsView):
 
             hit = self._page_point_at(scene_point)
 
-            if self.annotation_mode == "date_stamp" and hit is not None:
-                page_index, page_point = hit
-                if self._start_date_stamp_preview(page_index, page_point):
-                    event.accept()
-                    return
-
             if (
                 self.annotation_mode in {"rectangle", "ellipse", "cloud"}
                 and hit is not None
@@ -1978,10 +1886,7 @@ class PDFView(GraphicsView):
                 event.accept()
                 return
 
-            if (
-                self.annotation_mode not in {"hand", "date_stamp"}
-                and hit is not None
-            ):
+            if self.annotation_mode != "hand" and hit is not None:
                 self.annotation_clicked.emit(hit[0], hit[1])
                 event.accept()
                 return
@@ -1989,15 +1894,6 @@ class PDFView(GraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._date_stamp_preview_item is not None:
-            hit = self._page_point_at(
-                self.mapToScene(event.position().toPoint())
-            )
-            if hit is not None:
-                self._move_date_stamp_preview(hit[0], hit[1])
-            event.accept()
-            return
-
         if self._ctrl_pending_item is not None:
             current = self.mapToScene(event.position().toPoint())
             delta = current - self._ctrl_pending_start_scene
@@ -2039,21 +1935,6 @@ class PDFView(GraphicsView):
         self._refresh_selection_overlay()
 
     def mouseReleaseEvent(self, event):
-        if (
-            self._date_stamp_preview_item is not None
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            page_index = self._date_stamp_preview_page
-            page_point = self._date_stamp_preview_point
-            self._remove_date_stamp_preview()
-            if page_index is not None and page_point is not None:
-                self.annotation_clicked.emit(
-                    int(page_index),
-                    QPointF(page_point),
-                )
-            event.accept()
-            return
-
         if (
             self._ctrl_pending_item is not None
             and event.button() == Qt.MouseButton.LeftButton
@@ -2348,10 +2229,6 @@ class PDFView(GraphicsView):
 
     def cancel_current_operation(self):
         self.finish_property_edit()
-
-        if self._date_stamp_preview_item is not None:
-            self._remove_date_stamp_preview()
-            return True
 
         if self._cancel_shape_drawing():
             return True

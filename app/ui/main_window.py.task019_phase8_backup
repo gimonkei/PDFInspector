@@ -227,589 +227,6 @@ class ShapeContentDialog(QDialog):
 
 
 
-class AnnotationPropertiesPanel(QWidget):
-    """Right-side editor for the currently active annotation."""
-
-    TYPE_NAMES = {
-        "check": "チェックマーク",
-        "text": "コメント",
-        "date_stamp": "デート印",
-        "arrow": "矢印",
-        "rectangle": "矩形",
-        "ellipse": "円・楕円",
-        "cloud": "クラウド",
-    }
-
-    def __init__(self, main_window):
-        super().__init__(main_window)
-        self.main_window = main_window
-
-        # The dock width is user-adjustable. Keep only a practical minimum
-        # so controls do not become unusably narrow.
-        self.setMinimumWidth(230)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        self.item = None
-        self.record = None
-        self._loading = False
-        self._color_values = {}
-
-        self.root_layout = QVBoxLayout(self)
-        self.title_label = QLabel("注釈を選択してください", self)
-        self.title_label.setStyleSheet(
-            "font-weight: bold; padding: 4px;"
-        )
-        self.root_layout.addWidget(self.title_label)
-
-        self.form_widget = QWidget(self)
-        self.form_layout = QFormLayout(self.form_widget)
-        self.root_layout.addWidget(self.form_widget)
-
-        self._text_apply_timer = QTimer(self)
-        self._text_apply_timer.setSingleShot(True)
-        self._text_apply_timer.setInterval(450)
-        self._text_apply_timer.timeout.connect(
-            self.apply_changes
-        )
-
-        self._geometry_sync_timer = QTimer(self)
-        self._geometry_sync_timer.setInterval(100)
-        self._geometry_sync_timer.timeout.connect(
-            self.sync_geometry_from_record
-        )
-        self._geometry_sync_timer.start()
-
-        self.root_layout.addStretch(1)
-
-    def clear(self):
-        self.item = None
-        self.record = None
-        self.title_label.setText("注釈を選択してください")
-        self._clear_form()
-        self._text_apply_timer.stop()
-
-    def _clear_form(self):
-        while self.form_layout.rowCount() > 0:
-            self.form_layout.removeRow(0)
-        self._color_values = {}
-
-    def set_item(self, item):
-        if self.item is not None and not self._loading:
-            self._text_apply_timer.stop()
-
-        record = getattr(item, "record", None)
-        if not record:
-            self.clear()
-            return
-
-        self.item = item
-        self.record = record
-        self._loading = True
-        self._clear_form()
-
-        record_type = str(record.get("type", ""))
-        self.title_label.setText(
-            self.TYPE_NAMES.get(record_type, record_type)
-        )
-
-        self.type_label = QLabel(
-            self.TYPE_NAMES.get(record_type, record_type),
-            self,
-        )
-        self.form_layout.addRow("種類:", self.type_label)
-
-        if record_type == "check":
-            self._add_color("color", "色", record.get("color", "#dc0000"))
-            self.size_spin = self._add_double(
-                "サイズ",
-                record.get("size", 15.0),
-                6.0,
-                200.0,
-                1.0,
-                " pt",
-            )
-            self.line_width_spin = self._add_double(
-                "線幅",
-                record.get("line_width", 2.2),
-                0.5,
-                10.0,
-                0.5,
-                " pt",
-            )
-
-        elif record_type == "arrow":
-            self._add_color("color", "色", record.get("color", "#dc0000"))
-            self.line_width_spin = self._add_double(
-                "太さ",
-                record.get("line_width", 2.0),
-                0.5,
-                10.0,
-                0.5,
-                " pt",
-            )
-
-        elif record_type in {"rectangle", "cloud"}:
-            self.text_edit = QTextEdit(self)
-            self.text_edit.setMaximumHeight(110)
-            self.text_edit.setPlainText(str(record.get("text", "")))
-            self.form_layout.addRow("文字:", self.text_edit)
-
-            self._add_color(
-                "text_color",
-                "文字色",
-                record.get("text_color", "#000000"),
-            )
-            self._add_color(
-                "border_color",
-                "枠線色",
-                record.get("color", "#dc0000"),
-            )
-            self.line_width_spin = self._add_double(
-                "枠線太さ",
-                record.get("line_width", 2.0),
-                0.5,
-                10.0,
-                0.5,
-                " pt",
-            )
-            self.width_spin = self._add_double(
-                "幅",
-                record.get("width", 80.0),
-                8.0,
-                3000.0,
-                1.0,
-                " pt",
-            )
-            self.height_spin = self._add_double(
-                "高さ",
-                record.get("height", 50.0),
-                8.0,
-                3000.0,
-                1.0,
-                " pt",
-            )
-
-            self.fill_check = QCheckBox("塗りつぶす", self)
-            self.fill_check.setChecked(
-                bool(record.get("fill_enabled", False))
-            )
-            self.form_layout.addRow("背景:", self.fill_check)
-
-            self._add_color(
-                "fill_color",
-                "塗りつぶし色",
-                record.get("fill_color", "#ffff00"),
-            )
-            self.opacity_spin = self._add_double(
-                "濃度",
-                float(record.get("fill_opacity", 0.25)) * 100.0,
-                0.0,
-                100.0,
-                5.0,
-                " %",
-            )
-
-        elif record_type == "ellipse":
-            self._add_color(
-                "border_color",
-                "枠線色",
-                record.get("color", "#dc0000"),
-            )
-            self.line_width_spin = self._add_double(
-                "枠線太さ",
-                record.get("line_width", 2.0),
-                0.5,
-                10.0,
-                0.5,
-                " pt",
-            )
-            self.width_spin = self._add_double(
-                "幅",
-                record.get("width", 80.0),
-                8.0,
-                3000.0,
-                1.0,
-                " pt",
-            )
-            self.height_spin = self._add_double(
-                "高さ",
-                record.get("height", 50.0),
-                8.0,
-                3000.0,
-                1.0,
-                " pt",
-            )
-
-            self.fill_check = QCheckBox("塗りつぶす", self)
-            self.fill_check.setChecked(
-                bool(record.get("fill_enabled", False))
-            )
-            self.form_layout.addRow("背景:", self.fill_check)
-
-            self._add_color(
-                "fill_color",
-                "塗りつぶし色",
-                record.get("fill_color", "#ffff00"),
-            )
-            self.opacity_spin = self._add_double(
-                "濃度",
-                float(record.get("fill_opacity", 0.25)) * 100.0,
-                0.0,
-                100.0,
-                5.0,
-                " %",
-            )
-
-        elif record_type == "text":
-            self.text_edit = QTextEdit(self)
-            self.text_edit.setMaximumHeight(140)
-            self.text_edit.setPlainText(str(record.get("text", "")))
-            self.form_layout.addRow("コメント:", self.text_edit)
-
-        elif record_type == "date_stamp":
-            self.top_edit = QLineEdit(
-                str(record.get("top", "")),
-                self,
-            )
-            self.date_edit = QLineEdit(
-                str(record.get("date", "")),
-                self,
-            )
-            self.bottom_edit = QLineEdit(
-                str(record.get("bottom", "")),
-                self,
-            )
-            self.form_layout.addRow("上段:", self.top_edit)
-            self.form_layout.addRow("日付:", self.date_edit)
-            self.form_layout.addRow("下段:", self.bottom_edit)
-            self._add_color(
-                "color",
-                "色",
-                record.get("color", "black"),
-            )
-            self.size_spin = self._add_double(
-                "サイズ",
-                record.get("size", 72.0),
-                24.0,
-                240.0,
-                2.0,
-                " pt",
-            )
-            self.line_width_spin = self._add_double(
-                "線幅",
-                record.get("line_width", 1.5),
-                0.5,
-                10.0,
-                0.5,
-                " pt",
-            )
-
-        else:
-            self.form_layout.addRow(
-                QLabel("この注釈は現在表示のみ対応しています。", self)
-            )
-
-        self._connect_live_signals(record_type)
-        self._loading = False
-
-    def _connect_live_signals(self, record_type):
-        if record_type in {"check", "arrow", "ellipse", "rectangle", "cloud"}:
-            if hasattr(self, "line_width_spin"):
-                self.line_width_spin.valueChanged.connect(
-                    self._apply_numeric_change
-                )
-
-        if record_type == "check":
-            self.size_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-
-        if record_type in {"rectangle", "cloud", "ellipse"}:
-            self.width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.height_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.fill_check.toggled.connect(
-                self._apply_numeric_change
-            )
-            self.opacity_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-
-        if record_type in {"rectangle", "cloud", "text"}:
-            self.text_edit.textChanged.connect(
-                self._schedule_text_apply
-            )
-
-        if record_type == "date_stamp":
-            self.top_edit.textChanged.connect(
-                self._schedule_text_apply
-            )
-            self.date_edit.textChanged.connect(
-                self._schedule_text_apply
-            )
-            self.bottom_edit.textChanged.connect(
-                self._schedule_text_apply
-            )
-            self.size_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.line_width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-
-    def _schedule_text_apply(self):
-        if self._loading:
-            return
-        self._text_apply_timer.start()
-
-    def _apply_numeric_change(self, *args):
-        if self._loading:
-            return
-        self.apply_changes()
-
-    def sync_geometry_from_record(self):
-        if self._loading or self.item is None or not self.record:
-            return
-
-        record_type = str(self.record.get("type", ""))
-        self._loading = True
-        try:
-            if record_type == "check" and hasattr(self, "size_spin"):
-                value = float(self.record.get("size", 15.0))
-                if abs(self.size_spin.value() - value) > 0.05:
-                    self.size_spin.setValue(value)
-
-            elif record_type in {"rectangle", "cloud", "ellipse"}:
-                width = float(self.record.get("width", 80.0))
-                height = float(self.record.get("height", 50.0))
-                if abs(self.width_spin.value() - width) > 0.05:
-                    self.width_spin.setValue(width)
-                if abs(self.height_spin.value() - height) > 0.05:
-                    self.height_spin.setValue(height)
-
-            elif record_type == "date_stamp" and hasattr(self, "size_spin"):
-                value = float(self.record.get("size", 72.0))
-                if abs(self.size_spin.value() - value) > 0.05:
-                    self.size_spin.setValue(value)
-                    self.main_window._remember_annotation_defaults(
-                        "date_stamp",
-                        {
-                            "top": str(
-                                self.record.get("top", "検図")
-                            ),
-                            "bottom": str(
-                                self.record.get("bottom", "松井")
-                            ),
-                            "color": self.record.get(
-                                "color",
-                                "black",
-                            ),
-                            "size": value,
-                            "line_width": float(
-                                self.record.get(
-                                    "line_width",
-                                    1.5,
-                                )
-                            ),
-                        },
-                    )
-        finally:
-            self._loading = False
-
-    def _add_double(
-        self,
-        label,
-        value,
-        minimum,
-        maximum,
-        step,
-        suffix,
-    ):
-        spin = QDoubleSpinBox(self)
-        spin.setRange(float(minimum), float(maximum))
-        spin.setSingleStep(float(step))
-        spin.setDecimals(1)
-        spin.setSuffix(suffix)
-        spin.setValue(float(value))
-        self.form_layout.addRow(f"{label}:", spin)
-        return spin
-
-    def _add_color(self, key, label, value):
-        color = QColor(str(value))
-        if not color.isValid():
-            named = {
-                "black": "#000000",
-                "blue": "#0046dc",
-                "red": "#dc0000",
-            }
-            color = QColor(named.get(str(value), "#dc0000"))
-
-        self._color_values[key] = color
-        button = QPushButton(self)
-        button.clicked.connect(
-            lambda checked=False, k=key, b=button:
-                self._choose_color(k, b)
-        )
-        _set_color_button(button, color)
-        self.form_layout.addRow(f"{label}:", button)
-
-    def _choose_color(self, key, button):
-        current = self._color_values.get(key, QColor("#dc0000"))
-        selected = QColorDialog.getColor(
-            current,
-            self,
-            "色を選択",
-        )
-        if not selected.isValid():
-            return
-        selected.setAlpha(255)
-        self._color_values[key] = selected
-        _set_color_button(button, selected)
-        if not self._loading:
-            self.apply_changes()
-
-    def _color_name(self, key, fallback):
-        color = self._color_values.get(key)
-        if color is None or not color.isValid():
-            return fallback
-        return color.name(QColor.NameFormat.HexRgb)
-
-    def apply_changes(self):
-        if self._loading:
-            return
-
-        self._text_apply_timer.stop()
-        item = self.item
-        record = self.record
-        if item is None or not record:
-            return
-
-        record_type = str(record.get("type", ""))
-        view = self.main_window.view
-
-        if record_type == "check":
-            values = {
-                "color": self._color_name("color", "#dc0000"),
-                "size": self.size_spin.value(),
-                "line_width": self.line_width_spin.value(),
-            }
-            view.update_check_properties(item, **values)
-            self.main_window._remember_annotation_defaults(
-                "check",
-                values,
-            )
-
-        elif record_type == "arrow":
-            values = {
-                "color": self._color_name("color", "#dc0000"),
-                "line_width": self.line_width_spin.value(),
-            }
-            view.update_arrow_properties(item, **values)
-            self.main_window._remember_annotation_defaults(
-                "arrow",
-                values,
-            )
-
-        elif record_type in {"rectangle", "cloud", "ellipse"}:
-            text = (
-                self.text_edit.toPlainText()
-                if record_type in {"rectangle", "cloud"}
-                else ""
-            )
-            border_color = self._color_name(
-                "border_color",
-                "#dc0000",
-            )
-            values = {
-                "color": border_color,
-                "line_width": self.line_width_spin.value(),
-                "fill_enabled": self.fill_check.isChecked(),
-                "fill_opacity": self.opacity_spin.value() / 100.0,
-                "fill_color": self._color_name(
-                    "fill_color",
-                    "#ffff00",
-                ),
-            }
-
-            view.update_shape_properties(
-                item,
-                text,
-                font_size=record.get("font_size", 11.0),
-                fill_enabled=values["fill_enabled"],
-                fill_opacity=values["fill_opacity"],
-                fill_color=values["fill_color"],
-                text_color=(
-                    self._color_name("text_color", "#000000")
-                    if record_type in {"rectangle", "cloud"}
-                    else None
-                ),
-                border_color=border_color,
-                line_width=values["line_width"],
-                width=self.width_spin.value(),
-                height=self.height_spin.value(),
-            )
-
-            if record_type in {"rectangle", "cloud"}:
-                values["text_color"] = self._color_name(
-                    "text_color",
-                    "#000000",
-                )
-                values["font_size"] = record.get(
-                    "font_size",
-                    11.0,
-                )
-
-            self.main_window._remember_annotation_defaults(
-                record_type,
-                values,
-            )
-
-        elif record_type == "text":
-            text = self.text_edit.toPlainText().strip()
-            before = view._history_snapshot()
-            record["text"] = text
-            item.setPlainText(text)
-            view._commit_history_change(before)
-
-        elif record_type == "date_stamp":
-            before = view._history_snapshot()
-            record["top"] = self.top_edit.text()
-            record["date"] = self.date_edit.text()
-            record["bottom"] = self.bottom_edit.text()
-            record["color"] = self._color_name(
-                "color",
-                "#000000",
-            )
-            record["size"] = self.size_spin.value()
-            record["line_width"] = self.line_width_spin.value()
-            if hasattr(item, "refresh_from_record"):
-                item.refresh_from_record()
-            else:
-                item.update()
-            view._refresh_selection_overlay()
-            view._commit_history_change(before)
-
-            self.main_window._remember_annotation_defaults(
-                "date_stamp",
-                {
-                    "top": record["top"],
-                    "bottom": record["bottom"],
-                    "color": record["color"],
-                    "size": record["size"],
-                    "line_width": record["line_width"],
-                },
-            )
-
-        # Keep the current editor widgets in place. Rebuilding the panel
-        # after every value change causes visible flicker and width movement.
-
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -873,7 +290,6 @@ class MainWindow(QMainWindow):
 
         self.create_toolbar()
         self.create_date_stamp_panel()
-        self.create_annotation_properties_panel()
 
     def _get_annotation_defaults_path(self):
         config_dir = QStandardPaths.writableLocation(
@@ -893,13 +309,6 @@ class MainWindow(QMainWindow):
             "arrow": {
                 "color": "#dc0000",
                 "line_width": 2.0,
-            },
-            "date_stamp": {
-                "top": "検図",
-                "bottom": "松井",
-                "color": "black",
-                "size": 72.0,
-                "line_width": 1.5,
             },
             "rectangle": {
                 "color": "#dc0000",
@@ -1260,8 +669,6 @@ class MainWindow(QMainWindow):
 
         if count <= 0:
             self.statusBar().clearMessage()
-            if hasattr(self, "annotation_properties_panel"):
-                self.annotation_properties_panel.clear()
             return
 
         if count == 1:
@@ -1300,39 +707,6 @@ class MainWindow(QMainWindow):
         }:
             self.mark_tool_button.setDefaultAction(action)
 
-
-    def create_annotation_properties_panel(self):
-        self.annotation_properties_dock = QDockWidget(
-            "プロパティ",
-            self,
-        )
-        self.annotation_properties_dock.setObjectName(
-            "annotationPropertiesDock"
-        )
-        self.annotation_properties_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        self.annotation_properties_panel = (
-            AnnotationPropertiesPanel(self)
-        )
-        self.annotation_properties_dock.setWidget(
-            self.annotation_properties_panel
-        )
-        self.addDockWidget(
-            Qt.DockWidgetArea.LeftDockWidgetArea,
-            self.annotation_properties_dock,
-        )
-
-        self.annotation_properties_dock.setMinimumWidth(250)
-        self.annotation_properties_dock.setMaximumWidth(520)
-        self.annotation_properties_dock.resize(
-            300,
-            self.height(),
-        )
-        self.annotation_properties_dock.hide()
-
     def create_date_stamp_panel(self):
         self.selected_date_stamp_item = None
         self.date_stamp_templates = self._load_date_stamp_templates()
@@ -1367,7 +741,7 @@ class MainWindow(QMainWindow):
         self.stamp_color_combo.addItem("青", "blue")
         self.stamp_color_combo.addItem("赤", "red")
         self.stamp_size_spin = QSpinBox()
-        self.stamp_size_spin.setRange(24, 240)
+        self.stamp_size_spin.setRange(42, 240)
         self.stamp_size_spin.setValue(72)
         self.stamp_size_spin.setSuffix(" pt")
         self.stamp_line_spin = QDoubleSpinBox()
@@ -1375,30 +749,6 @@ class MainWindow(QMainWindow):
         self.stamp_line_spin.setSingleStep(0.25)
         self.stamp_line_spin.setValue(1.5)
         self.stamp_line_spin.setSuffix(" pt")
-
-        memory = self._annotation_defaults.get(
-            "date_stamp",
-            {},
-        )
-        self.stamp_top_edit.setText(
-            str(memory.get("top", "検図"))
-        )
-        self.stamp_bottom_edit.setText(
-            str(memory.get("bottom", "松井"))
-        )
-        memory_color = str(memory.get("color", "black"))
-        memory_color_index = self.stamp_color_combo.findData(
-            memory_color
-        )
-        self.stamp_color_combo.setCurrentIndex(
-            max(0, memory_color_index)
-        )
-        self.stamp_size_spin.setValue(
-            round(float(memory.get("size", 72.0)))
-        )
-        self.stamp_line_spin.setValue(
-            float(memory.get("line_width", 1.5))
-        )
 
         form.addRow("テンプレート", self.stamp_template_combo)
         form.addRow("", template_widget)
@@ -1524,8 +874,7 @@ class MainWindow(QMainWindow):
     def current_date_stamp_settings(self):
         today_text = date.today().strftime("'%y/%m/%d")
         self.stamp_date_edit.setText(today_text)
-
-        settings = {
+        return {
             "top": self.stamp_top_edit.text().strip(),
             "date": today_text,
             "bottom": self.stamp_bottom_edit.text().strip(),
@@ -1533,23 +882,54 @@ class MainWindow(QMainWindow):
             "size": float(self.stamp_size_spin.value()),
             "line_width": float(self.stamp_line_spin.value()),
         }
-        self._remember_annotation_defaults(
-            "date_stamp",
+
+    def on_annotation_selected(self, item):
+        if getattr(item, "record", {}).get("type") != "date_stamp":
+            self.selected_date_stamp_item = None
+            return
+        self.selected_date_stamp_item = item
+        record = item.record
+        widgets = [
+            self.stamp_top_edit,
+            self.stamp_date_edit,
+            self.stamp_bottom_edit,
+            self.stamp_color_combo,
+            self.stamp_size_spin,
+            self.stamp_line_spin,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.stamp_top_edit.setText(record.get("top", ""))
+        self.stamp_date_edit.setText(record.get("date", ""))
+        self.stamp_bottom_edit.setText(record.get("bottom", ""))
+        color_index = self.stamp_color_combo.findData(record.get("color", "black"))
+        self.stamp_color_combo.setCurrentIndex(max(0, color_index))
+        self.stamp_size_spin.setValue(round(float(record.get("size", 72.0))))
+        self.stamp_line_spin.setValue(float(record.get("line_width", 1.5)))
+        for widget in widgets:
+            widget.blockSignals(False)
+        self.date_stamp_dock.show()
+        self.date_stamp_dock.raise_()
+
+    def update_selected_date_stamp(self):
+        item = self.selected_date_stamp_item
+        if item is None or item.scene() is None:
+            return
+        self.view.update_annotation_record(
+            item,
             {
-                key: value
-                for key, value in settings.items()
-                if key != "date"
+                "top": self.stamp_top_edit.text().strip(),
+                "date": self.stamp_date_edit.text().strip(),
+                "bottom": self.stamp_bottom_edit.text().strip(),
+                "color": self.stamp_color_combo.currentData(),
+                "size": float(self.stamp_size_spin.value()),
+                "line_width": float(self.stamp_line_spin.value()),
             },
+            merge_property_edits=True,
         )
-        return settings
 
     def set_annotation_mode(self, mode):
-        if mode == "date_stamp":
-            self.view.set_date_stamp_preview_settings(
-                self.current_date_stamp_settings()
-            )
         self.view.set_annotation_mode(mode)
-
 
     def on_annotation_clicked(self, page_index, page_point):
         if not self.document.has_document():
@@ -1583,86 +963,6 @@ class MainWindow(QMainWindow):
                 self.current_date_stamp_settings(),
             )
             return
-
-
-    def update_selected_date_stamp(self):
-        memory_values = {
-            "top": self.stamp_top_edit.text().strip(),
-            "bottom": self.stamp_bottom_edit.text().strip(),
-            "color": self.stamp_color_combo.currentData(),
-            "size": float(self.stamp_size_spin.value()),
-            "line_width": float(self.stamp_line_spin.value()),
-        }
-        self._remember_annotation_defaults(
-            "date_stamp",
-            memory_values,
-        )
-
-        preview_settings = dict(memory_values)
-        preview_settings["date"] = (
-            self.stamp_date_edit.text().strip()
-            or date.today().strftime("'%y/%m/%d")
-        )
-        self.view.set_date_stamp_preview_settings(preview_settings)
-
-        item = self.selected_date_stamp_item
-        if item is None or item.scene() is None:
-            return
-
-        self.view.update_annotation_record(
-            item,
-            {
-                **memory_values,
-                "date": self.stamp_date_edit.text().strip(),
-            },
-            merge_property_edits=True,
-        )
-
-
-    def on_annotation_selected(self, item):
-        if hasattr(self, "annotation_properties_panel"):
-            if item is None:
-                self.annotation_properties_panel.clear()
-            else:
-                self.annotation_properties_panel.set_item(item)
-                self.annotation_properties_dock.show()
-                self.annotation_properties_dock.raise_()
-
-        if getattr(item, "record", {}).get("type") != "date_stamp":
-            self.selected_date_stamp_item = None
-            return
-
-        self.selected_date_stamp_item = item
-        record = item.record
-        widgets = [
-            self.stamp_top_edit,
-            self.stamp_date_edit,
-            self.stamp_bottom_edit,
-            self.stamp_color_combo,
-            self.stamp_size_spin,
-            self.stamp_line_spin,
-        ]
-        for widget in widgets:
-            widget.blockSignals(True)
-
-        self.stamp_top_edit.setText(record.get("top", ""))
-        self.stamp_date_edit.setText(record.get("date", ""))
-        self.stamp_bottom_edit.setText(record.get("bottom", ""))
-        color_index = self.stamp_color_combo.findData(
-            record.get("color", "black")
-        )
-        self.stamp_color_combo.setCurrentIndex(
-            max(0, color_index)
-        )
-        self.stamp_size_spin.setValue(
-            round(float(record.get("size", 72.0)))
-        )
-        self.stamp_line_spin.setValue(
-            float(record.get("line_width", 1.5))
-        )
-
-        for widget in widgets:
-            widget.blockSignals(False)
 
 
     def on_annotation_edit_requested(self, item):

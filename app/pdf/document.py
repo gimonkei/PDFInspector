@@ -118,7 +118,7 @@ class PDFDocument:
             point = point * page.derotation_matrix
         return point
 
-    def add_checkmark(self, page_index, x, y, size=15.0):
+    def add_checkmark(self, page_index, x, y, size=15.0, color="#dc0000", line_width=2.2):
         page = self.get_page(page_index)
         if page is None:
             return None
@@ -134,9 +134,10 @@ class PDFDocument:
             point = self._display_point_to_pdf(page, px, py)
             points.append((float(point.x), float(point.y)))
 
+        rgb = self._parse_annotation_color(color, fallback=(0.86, 0.0, 0.0))
         annot = page.add_ink_annot([points])
-        annot.set_colors(stroke=(1.0, 0.0, 0.0))
-        annot.set_border(width=2.0)
+        annot.set_colors(stroke=rgb)
+        annot.set_border(width=max(float(line_width), 0.5))
         annot.set_info(
             title="PDFInspector",
             subject="チェック",
@@ -269,11 +270,7 @@ class PDFDocument:
 
         start = self._display_point_to_pdf(page, start_x, start_y)
         end = self._display_point_to_pdf(page, end_x, end_y)
-        rgb = {
-            "black": (0.0, 0.0, 0.0),
-            "blue": (0.0, 0.27, 0.86),
-            "red": (0.86, 0.0, 0.0),
-        }.get(str(color), (0.86, 0.0, 0.0))
+        rgb = self._parse_annotation_color(color, fallback=(0.86, 0.0, 0.0))
 
         annot = page.add_line_annot(start, end)
         annot.set_colors(stroke=rgb)
@@ -297,6 +294,30 @@ class PDFDocument:
         annot.update()
         return annot
 
+    @staticmethod
+    def _parse_annotation_color(value, fallback=(0.86, 0.0, 0.0)):
+        named = {
+            "black": (0.0, 0.0, 0.0),
+            "blue": (0.0, 0.27, 0.86),
+            "red": (0.86, 0.0, 0.0),
+            "yellow": (1.0, 1.0, 0.0),
+            "green": (0.0, 0.65, 0.0),
+            "white": (1.0, 1.0, 1.0),
+        }
+        text = str(value).strip().lower()
+        if text in named:
+            return named[text]
+        if text.startswith("#") and len(text) == 7:
+            try:
+                return (
+                    int(text[1:3], 16) / 255.0,
+                    int(text[3:5], 16) / 255.0,
+                    int(text[5:7], 16) / 255.0,
+                )
+            except ValueError:
+                pass
+        return fallback
+
     def add_shape(
         self,
         shape_type,
@@ -307,6 +328,12 @@ class PDFDocument:
         height,
         color="red",
         line_width=2.0,
+        text="",
+        font_size=11.0,
+        text_color="#000000",
+        fill_enabled=False,
+        fill_opacity=0.25,
+        fill_color="#ffff00",
     ):
         """Write a standard PDF square or circle annotation."""
         page = self.get_page(page_index)
@@ -320,11 +347,29 @@ class PDFDocument:
             y + height,
         )
         rect = fitz.Rect(top_left, bottom_right).normalize()
-        rgb = {
-            "black": (0.0, 0.0, 0.0),
-            "blue": (0.0, 0.27, 0.86),
-            "red": (0.86, 0.0, 0.0),
-        }.get(str(color), (0.86, 0.0, 0.0))
+        rgb = self._parse_annotation_color(color, fallback=(0.86, 0.0, 0.0))
+
+        fill_rgb = self._parse_annotation_color(
+            fill_color,
+            fallback=rgb,
+        )
+
+        if bool(fill_enabled):
+            if shape_type == "ellipse":
+                fill_annot = page.add_circle_annot(rect)
+            else:
+                fill_annot = page.add_rect_annot(rect)
+            fill_annot.set_colors(fill=fill_rgb)
+            fill_annot.set_border(width=0)
+            fill_annot.set_opacity(
+                min(max(float(fill_opacity), 0.0), 1.0)
+            )
+            fill_annot.set_info(
+                title="PDFInspector",
+                subject="図形塗りつぶし",
+                content="図形塗りつぶし",
+            )
+            fill_annot.update()
 
         if shape_type == "ellipse":
             annot = page.add_circle_annot(rect)
@@ -341,6 +386,195 @@ class PDFDocument:
             content=subject,
         )
         annot.update()
+
+        content = str(text).strip()
+        if content:
+            text_rgb = self._parse_annotation_color(
+                text_color,
+                fallback=rgb,
+            )
+            self._add_shape_freetext(
+                page,
+                rect,
+                content,
+                text_rgb,
+                font_size,
+            )
+
+        return annot
+
+
+    def _add_shape_freetext(
+        self,
+        page,
+        rect,
+        text,
+        text_rgb,
+        font_size,
+    ):
+        margin = max(float(font_size) * 0.35, 4.0)
+        text_rect = fitz.Rect(
+            rect.x0 + margin,
+            rect.y0 + margin,
+            rect.x1 - margin,
+            rect.y1 - margin,
+        )
+        if text_rect.width <= 1.0 or text_rect.height <= 1.0:
+            return None
+        annot = page.add_freetext_annot(
+            text_rect,
+            str(text),
+            fontsize=max(float(font_size), 4.0),
+            fontname="helv",
+            text_color=text_rgb,
+            fill_color=None,
+            border_color=None,
+            align=1,
+        )
+        annot.set_info(
+            title="PDFInspector",
+            subject="図形内テキスト",
+            content=str(text),
+        )
+        annot.update()
+        return annot
+
+    def add_cloud(
+        self,
+        page_index,
+        x,
+        y,
+        width,
+        height,
+        color="red",
+        line_width=2.0,
+        cloud_radius=8.0,
+        text="",
+        font_size=11.0,
+        text_color="#000000",
+        fill_enabled=False,
+        fill_opacity=0.25,
+        fill_color="#ffff00",
+    ):
+        """Write a cloud border as a standard PDF ink annotation."""
+        page = self.get_page(page_index)
+        if page is None:
+            return None
+
+        width = max(float(width), 8.0)
+        height = max(float(height), 8.0)
+        radius = max(
+            4.0,
+            min(float(cloud_radius), min(width, height) / 4.0),
+        )
+
+        left = float(x)
+        top = float(y)
+        right = left + width
+        bottom = top + height
+        center_x = (left + right) * 0.5
+        center_y = (top + bottom) * 0.5
+
+        def edge_points(start, end):
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = max((dx * dx + dy * dy) ** 0.5, 0.001)
+            count = max(1, int(round(length / (radius * 1.55))))
+            return [
+                (
+                    start[0] + dx * index / count,
+                    start[1] + dy * index / count,
+                )
+                for index in range(count + 1)
+            ]
+
+        points = (
+            edge_points((left, top), (right, top))
+            + edge_points((right, top), (right, bottom))[1:]
+            + edge_points((right, bottom), (left, bottom))[1:]
+            + edge_points((left, bottom), (left, top))[1:]
+        )
+
+        sampled = []
+        subdivisions = 5
+
+        for index, current in enumerate(points):
+            following = points[(index + 1) % len(points)]
+            midpoint_x = (current[0] + following[0]) * 0.5
+            midpoint_y = (current[1] + following[1]) * 0.5
+            vx = midpoint_x - center_x
+            vy = midpoint_y - center_y
+            distance = max((vx * vx + vy * vy) ** 0.5, 0.001)
+            control_x = midpoint_x + vx / distance * radius * 0.62
+            control_y = midpoint_y + vy / distance * radius * 0.62
+
+            for step in range(subdivisions):
+                t = step / subdivisions
+                inv = 1.0 - t
+                px = (
+                    inv * inv * current[0]
+                    + 2.0 * inv * t * control_x
+                    + t * t * following[0]
+                )
+                py = (
+                    inv * inv * current[1]
+                    + 2.0 * inv * t * control_y
+                    + t * t * following[1]
+                )
+                point = self._display_point_to_pdf(page, px, py)
+                sampled.append((float(point.x), float(point.y)))
+
+        if sampled:
+            sampled.append(sampled[0])
+
+        rgb = self._parse_annotation_color(color, fallback=(0.86, 0.0, 0.0))
+
+        fill_rgb = self._parse_annotation_color(
+            fill_color,
+            fallback=rgb,
+        )
+
+        if bool(fill_enabled) and sampled:
+            fill_annot = page.add_polygon_annot(sampled[:-1])
+            fill_annot.set_colors(fill=fill_rgb)
+            fill_annot.set_border(width=0)
+            fill_annot.set_opacity(
+                min(max(float(fill_opacity), 0.0), 1.0)
+            )
+            fill_annot.set_info(
+                title="PDFInspector",
+                subject="クラウド塗りつぶし",
+                content="クラウド塗りつぶし",
+            )
+            fill_annot.update()
+
+        annot = page.add_ink_annot([sampled])
+        annot.set_colors(stroke=rgb)
+        annot.set_border(width=max(float(line_width), 0.5))
+        annot.set_info(
+            title="PDFInspector",
+            subject="クラウド",
+            content="クラウド",
+        )
+        annot.update()
+
+        content = str(text).strip()
+        if content:
+            top_left = self._display_point_to_pdf(page, x, y)
+            bottom_right = self._display_point_to_pdf(page, x + width, y + height)
+            rect = fitz.Rect(top_left, bottom_right).normalize()
+            text_rgb = self._parse_annotation_color(
+                text_color,
+                fallback=rgb,
+            )
+            self._add_shape_freetext(
+                page,
+                rect,
+                content,
+                text_rgb,
+                font_size,
+            )
+
         return annot
 
     def rotate_page(self, index, angle):

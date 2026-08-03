@@ -3,11 +3,14 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QToolBar,
+    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -32,6 +36,195 @@ from app.pdf.render_pipeline import RenderPipeline
 from app.pdf.render_manager import RenderManager
 from app.pdf.renderer import PDFRenderer
 from app.viewer.pdf_view import PDFView
+
+
+def _set_color_button(button, color):
+    name = color.name(QColor.NameFormat.HexRgb)
+    fg = "#000000" if color.lightness() > 145 else "#ffffff"
+    button.setText(name.upper())
+    button.setStyleSheet(f"QPushButton {{background-color: {name}; color: {fg}; padding: 5px 12px;}}")
+
+
+class LinePropertiesDialog(QDialog):
+    def __init__(self, parent, title, record):
+        super().__init__(parent); self.setWindowTitle(title)
+        layout=QVBoxLayout(self); form=QFormLayout()
+        self._color=QColor(str(record.get("color", "#dc0000")))
+        if not self._color.isValid(): self._color=QColor("#dc0000")
+        self.color_button=QPushButton(self); self.color_button.clicked.connect(self._choose_color); _set_color_button(self.color_button,self._color); form.addRow("色:",self.color_button)
+        self.line_width_spin=QDoubleSpinBox(self); self.line_width_spin.setRange(0.5,10.0); self.line_width_spin.setSingleStep(0.5); self.line_width_spin.setDecimals(1); self.line_width_spin.setSuffix(" pt"); self.line_width_spin.setValue(max(float(record.get("line_width",2.0)),0.5)); form.addRow("太さ:",self.line_width_spin)
+        layout.addLayout(form)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel,parent=self); buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+    def _choose_color(self):
+        c=QColorDialog.getColor(self._color,self,"色を選択")
+        if c.isValid(): c.setAlpha(255); self._color=c; _set_color_button(self.color_button,c)
+    def values(self): return {"color":self._color.name(QColor.NameFormat.HexRgb),"line_width":self.line_width_spin.value()}
+
+
+class CheckPropertiesDialog(LinePropertiesDialog):
+    def __init__(self,parent,record):
+        super().__init__(parent,"チェックマークの編集",record)
+        form=self.layout().itemAt(0).layout(); self.size_spin=QDoubleSpinBox(self); self.size_spin.setRange(6.0,200.0); self.size_spin.setSingleStep(1.0); self.size_spin.setDecimals(1); self.size_spin.setSuffix(" pt"); self.size_spin.setValue(max(float(record.get("size",15.0)),6.0)); form.addRow("サイズ:",self.size_spin)
+    def values(self):
+        v=super().values(); v["size"]=self.size_spin.value(); return v
+
+
+class ShapeContentDialog(QDialog):
+    def __init__(self, parent, title, record):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(420, 300)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setPlainText(str(record.get("text", "")))
+        self.text_edit.setPlaceholderText("図形内に表示する文字")
+        form.addRow("文字:", self.text_edit)
+
+        self._text_color = QColor(
+            str(record.get("text_color", "#000000"))
+        )
+        if not self._text_color.isValid():
+            self._text_color = QColor("#000000")
+
+        self.text_color_button = QPushButton(self)
+        self.text_color_button.clicked.connect(
+            self._choose_text_color
+        )
+        self._update_text_color_button()
+        form.addRow("文字色:", self.text_color_button)
+
+        self._border_color = QColor(str(record.get("color", "#dc0000")))
+        if not self._border_color.isValid(): self._border_color = QColor("#dc0000")
+        self.border_color_button = QPushButton(self); self.border_color_button.clicked.connect(self._choose_border_color); _set_color_button(self.border_color_button,self._border_color); form.addRow("枠線色:",self.border_color_button)
+        self.line_width_spin = QDoubleSpinBox(self); self.line_width_spin.setRange(0.5,10.0); self.line_width_spin.setSingleStep(0.5); self.line_width_spin.setDecimals(1); self.line_width_spin.setSuffix(" pt"); self.line_width_spin.setValue(max(float(record.get("line_width",2.0)),0.5)); form.addRow("枠線太さ:",self.line_width_spin)
+
+        self.fill_combo = QComboBox(self)
+        self.fill_combo.addItem("透明", False)
+        self.fill_combo.addItem("塗りつぶし", True)
+        self.fill_combo.setCurrentIndex(
+            1 if bool(record.get("fill_enabled", False)) else 0
+        )
+        form.addRow("背景:", self.fill_combo)
+
+        self._fill_color = QColor(
+            str(record.get("fill_color", "#ffff00"))
+        )
+        if not self._fill_color.isValid():
+            self._fill_color = QColor("#ffff00")
+
+        self.fill_color_button = QPushButton(self)
+        self.fill_color_button.clicked.connect(self._choose_fill_color)
+        self._update_fill_color_button()
+        form.addRow("塗りつぶし色:", self.fill_color_button)
+
+        self.opacity_spin = QSpinBox(self)
+        self.opacity_spin.setRange(5, 100)
+        self.opacity_spin.setSuffix("%")
+        self.opacity_spin.setValue(
+            int(round(float(record.get("fill_opacity", 0.25)) * 100))
+        )
+        form.addRow("塗りつぶし濃度:", self.opacity_spin)
+
+        self.fill_combo.currentIndexChanged.connect(
+            self._update_fill_controls
+        )
+        self._update_fill_controls()
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _choose_text_color(self):
+        selected = QColorDialog.getColor(
+            self._text_color,
+            self,
+            "文字色を選択",
+        )
+        if not selected.isValid():
+            return
+        selected.setAlpha(255)
+        self._text_color = selected
+        self._update_text_color_button()
+
+    def _update_text_color_button(self):
+        color_name = self._text_color.name(
+            QColor.NameFormat.HexRgb
+        )
+        text_color = (
+            "#000000"
+            if self._text_color.lightness() > 145
+            else "#ffffff"
+        )
+        self.text_color_button.setText(color_name.upper())
+        self.text_color_button.setStyleSheet(
+            "QPushButton {"
+            f"background-color: {color_name};"
+            f"color: {text_color};"
+            "padding: 5px 12px;"
+            "}"
+        )
+
+    def _choose_border_color(self):
+        c=QColorDialog.getColor(self._border_color,self,"枠線色を選択")
+        if c.isValid(): c.setAlpha(255); self._border_color=c; _set_color_button(self.border_color_button,c)
+
+    def _update_fill_controls(self):
+        enabled = bool(self.fill_combo.currentData())
+        self.fill_color_button.setEnabled(enabled)
+        self.opacity_spin.setEnabled(enabled)
+
+    def _choose_fill_color(self):
+        selected = QColorDialog.getColor(
+            self._fill_color,
+            self,
+            "塗りつぶし色を選択",
+        )
+        if not selected.isValid():
+            return
+        selected.setAlpha(255)
+        self._fill_color = selected
+        self._update_fill_color_button()
+
+    def _update_fill_color_button(self):
+        color_name = self._fill_color.name(QColor.NameFormat.HexRgb)
+        text_color = (
+            "#000000"
+            if self._fill_color.lightness() > 145
+            else "#ffffff"
+        )
+        self.fill_color_button.setText(color_name.upper())
+        self.fill_color_button.setStyleSheet(
+            "QPushButton {"
+            f"background-color: {color_name};"
+            f"color: {text_color};"
+            "padding: 5px 12px;"
+            "}"
+        )
+
+    def values(self):
+        return {
+            "text": self.text_edit.toPlainText().strip(),
+            "text_color": self._text_color.name(
+                QColor.NameFormat.HexRgb
+            ),
+            "border_color": self._border_color.name(QColor.NameFormat.HexRgb),
+            "line_width": self.line_width_spin.value(),
+            "fill_enabled": bool(self.fill_combo.currentData()),
+            "fill_opacity": self.opacity_spin.value() / 100.0,
+            "fill_color": self._fill_color.name(
+                QColor.NameFormat.HexRgb
+            ),
+        }
+
 
 
 class MainWindow(QMainWindow):
@@ -57,6 +250,15 @@ class MainWindow(QMainWindow):
         self.current_page = 0
 
         self.view = PDFView()
+        self._annotation_defaults_path = (
+            self._get_annotation_defaults_path()
+        )
+        self._annotation_defaults = (
+            self._load_annotation_defaults()
+        )
+        self.view.set_annotation_defaults(
+            self._annotation_defaults
+        )
         self.view.page_changed.connect(self.update_current_page)
         self.view.zoom_changed.connect(self.on_zoom_changed)
         self.view.visible_region_changed.connect(
@@ -83,6 +285,101 @@ class MainWindow(QMainWindow):
 
         self.create_toolbar()
         self.create_date_stamp_panel()
+
+    def _get_annotation_defaults_path(self):
+        config_dir = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppConfigLocation
+        )
+        folder = Path(config_dir) / "PDFInspector"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / "annotation_defaults.json"
+
+    def _default_annotation_settings(self):
+        return {
+            "check": {
+                "color": "#dc0000",
+                "size": 15.0,
+                "line_width": 2.2,
+            },
+            "arrow": {
+                "color": "#dc0000",
+                "line_width": 2.0,
+            },
+            "rectangle": {
+                "color": "#dc0000",
+                "line_width": 2.0,
+                "text_color": "#000000",
+                "fill_enabled": False,
+                "fill_opacity": 0.25,
+                "fill_color": "#ffff00",
+                "font_size": 11.0,
+            },
+            "ellipse": {
+                "color": "#dc0000",
+                "line_width": 2.0,
+                "fill_enabled": False,
+                "fill_opacity": 0.25,
+                "fill_color": "#ffff00",
+            },
+            "cloud": {
+                "color": "#dc0000",
+                "line_width": 2.0,
+                "text_color": "#000000",
+                "fill_enabled": False,
+                "fill_opacity": 0.25,
+                "fill_color": "#ffff00",
+                "font_size": 11.0,
+            },
+        }
+
+    def _load_annotation_defaults(self):
+        defaults = self._default_annotation_settings()
+        path = self._annotation_defaults_path
+        if not path.exists():
+            return defaults
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return defaults
+        if not isinstance(loaded, dict):
+            return defaults
+        for annotation_type, values in loaded.items():
+            if (
+                annotation_type in defaults
+                and isinstance(values, dict)
+            ):
+                defaults[annotation_type].update(values)
+        return defaults
+
+    def _save_annotation_defaults(self):
+        try:
+            self._annotation_defaults_path.write_text(
+                json.dumps(
+                    self._annotation_defaults,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _remember_annotation_defaults(
+        self,
+        annotation_type,
+        values,
+    ):
+        if not isinstance(values, dict):
+            return
+        current = self._annotation_defaults.setdefault(
+            str(annotation_type),
+            {},
+        )
+        current.update(values)
+        self.view.set_annotation_defaults(
+            {annotation_type: current}
+        )
+        self._save_annotation_defaults()
 
     def create_toolbar(self):
         toolbar = QToolBar()
@@ -188,14 +485,75 @@ class MainWindow(QMainWindow):
             shape_menu = QMenu(self.shape_tool_button)
             self.shape_tool_button.setMenu(shape_menu)
         shape_menu.addAction(self.arrow_action)
+
+        self.rectangle_action = QAction("□ 矩形", self)
+        self.rectangle_action.setCheckable(True)
+        self.rectangle_action.setToolTip(
+            "ページ上をドラッグして矩形を追加"
+        )
+        self.rectangle_action.triggered.connect(
+            lambda: self.set_annotation_mode("rectangle")
+        )
+        self.annotation_group.addAction(self.rectangle_action)
+        shape_menu.addAction(self.rectangle_action)
+
+        self.ellipse_action = QAction("○ 円・楕円", self)
+        self.ellipse_action.setCheckable(True)
+        self.ellipse_action.setToolTip(
+            "ページ上をドラッグして円・楕円を追加"
+        )
+        self.ellipse_action.triggered.connect(
+            lambda: self.set_annotation_mode("ellipse")
+        )
+        self.annotation_group.addAction(self.ellipse_action)
+        shape_menu.addAction(self.ellipse_action)
+
+        self.cloud_action = QAction("☁ クラウド", self)
+        self.cloud_action.setCheckable(True)
+        self.cloud_action.setToolTip(
+            "ページ上をドラッグしてクラウド枠を追加"
+        )
+        self.cloud_action.triggered.connect(
+            lambda: self.set_annotation_mode("cloud")
+        )
+        self.annotation_group.addAction(self.cloud_action)
+        shape_menu.addAction(self.cloud_action)
+
+        shape_menu.triggered.connect(
+            self._set_shape_default_action
+        )
         toolbar.addWidget(self.shape_tool_button)
         toolbar.addSeparator()
+
+        self.select_all_action = QAction("すべて選択", self)
+        self.select_all_action.setShortcut(
+            QKeySequence.StandardKey.SelectAll
+        )
+        self.select_all_action.triggered.connect(
+            self.view.select_all_annotations
+        )
+
+        self.copy_action = QAction("コピー", self)
+        self.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.copy_action.triggered.connect(
+            self.view.copy_selected_annotations
+        )
+
+        self.paste_action = QAction("貼り付け", self)
+        self.paste_action.setShortcut(QKeySequence.StandardKey.Paste)
+        self.paste_action.triggered.connect(
+            self.view.paste_annotations
+        )
 
         self.undo_action = QAction("↶ 元に戻す", self)
         self.undo_action.setToolTip("注釈操作を元に戻す (Ctrl+Z)")
         self.undo_action.setShortcut("Ctrl+Z")
         self.undo_action.setEnabled(False)
         self.undo_action.triggered.connect(self.view.undo_annotations)
+        toolbar.addAction(self.select_all_action)
+        toolbar.addAction(self.copy_action)
+        toolbar.addAction(self.paste_action)
+        toolbar.addSeparator()
         toolbar.addAction(self.undo_action)
 
         self.redo_action = QAction("↷ やり直す", self)
@@ -297,6 +655,15 @@ class MainWindow(QMainWindow):
     def on_redo_available_changed(self, available):
         if hasattr(self, "redo_action"):
             self.redo_action.setEnabled(bool(available))
+
+    def _set_shape_default_action(self, action):
+        if action in {
+            self.arrow_action,
+            self.rectangle_action,
+            self.ellipse_action,
+            self.cloud_action,
+        }:
+            self.shape_tool_button.setDefaultAction(action)
 
     def _set_mark_default_action(self, action):
         """Remember the last mark tool as the split button's main action."""
@@ -528,36 +895,20 @@ class MainWindow(QMainWindow):
             merge_property_edits=True,
         )
 
-    def on_annotation_edit_requested(self, item):
-        record = getattr(item, "record", {})
-        if record.get("type") == "date_stamp":
-            self.on_annotation_selected(item)
-            return
-        if record.get("type") == "text":
-            text, accepted = QInputDialog.getMultiLineText(
-                self, "コメント編集", "コメント内容:", record.get("text", "")
-            )
-            if not accepted:
-                return
-            text = text.strip()
-            if not text:
-                self.view.remove_annotation_item(item)
-                return
-            self.view.update_annotation_record(item, {"text": text})
-
     def set_annotation_mode(self, mode):
         self.view.set_annotation_mode(mode)
-        if mode == "date_stamp":
-            self.date_stamp_dock.show()
-            self.date_stamp_dock.raise_()
 
     def on_annotation_clicked(self, page_index, page_point):
         if not self.document.has_document():
             return
 
-        if self.view.annotation_mode == "check":
+        mode = self.view.annotation_mode
+
+        if mode == "check":
             self.view.add_check_overlay(page_index, page_point)
-        elif self.view.annotation_mode == "comment":
+            return
+
+        if mode == "comment":
             text, accepted = QInputDialog.getMultiLineText(
                 self,
                 "コメント追加",
@@ -565,13 +916,120 @@ class MainWindow(QMainWindow):
             )
             if not accepted or not text.strip():
                 return
-            self.view.add_text_overlay(page_index, page_point, text)
-        elif self.view.annotation_mode == "date_stamp":
+            self.view.add_text_overlay(
+                page_index,
+                page_point,
+                text,
+            )
+            return
+
+        if mode == "date_stamp":
             self.view.add_date_stamp_overlay(
                 page_index,
                 page_point,
                 self.current_date_stamp_settings(),
             )
+            return
+
+
+    def on_annotation_edit_requested(self, item):
+        record = getattr(item, "record", None)
+        if not record:
+            return
+
+        record_type = record.get("type")
+
+        if record_type == "text":
+            text, accepted = QInputDialog.getMultiLineText(
+                self,
+                "コメント編集",
+                "コメント内容:",
+                record.get("text", ""),
+            )
+            if not accepted:
+                return
+            text = text.strip()
+            if not text:
+                before = self.view._history_snapshot()
+                self.view._remove_record(record)
+                self.view._commit_history_change(before)
+                return
+            before = self.view._history_snapshot()
+            record["text"] = text
+            item.setPlainText(text)
+            self.view._commit_history_change(before)
+            return
+
+        if record_type == "date_stamp":
+            self.on_annotation_selected(item)
+            return
+
+        if record_type == "arrow":
+            dialog = LinePropertiesDialog(self, "矢印の編集", record)
+            if dialog.exec() != QDialog.DialogCode.Accepted: return
+            values = dialog.values()
+            self.view.update_arrow_properties(
+                item,
+                color=values["color"],
+                line_width=values["line_width"],
+            )
+            self._remember_annotation_defaults(
+                "arrow",
+                values,
+            )
+            return
+
+        if record_type == "check":
+            dialog = CheckPropertiesDialog(self, record)
+            if dialog.exec() != QDialog.DialogCode.Accepted: return
+            values = dialog.values()
+            self.view.update_check_properties(
+                item,
+                color=values["color"],
+                size=values["size"],
+                line_width=values["line_width"],
+            )
+            self._remember_annotation_defaults(
+                "check",
+                values,
+            )
+            return
+
+        if record_type in {"rectangle", "cloud"}:
+            title = (
+                "矩形の編集"
+                if record_type == "rectangle"
+                else "クラウドの編集"
+            )
+            dialog = ShapeContentDialog(self, title, record)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            values = dialog.values()
+            self.view.update_shape_properties(
+                item,
+                values["text"],
+                font_size=record.get("font_size", 11.0),
+                fill_enabled=values["fill_enabled"],
+                fill_opacity=values["fill_opacity"],
+                fill_color=values["fill_color"],
+                text_color=values["text_color"],
+                border_color=values["border_color"],
+                line_width=values["line_width"],
+            )
+            self._remember_annotation_defaults(
+                record_type,
+                {
+                    "color": values["border_color"],
+                    "line_width": values["line_width"],
+                    "text_color": values["text_color"],
+                    "fill_enabled": values["fill_enabled"],
+                    "fill_opacity": values["fill_opacity"],
+                    "fill_color": values["fill_color"],
+                    "font_size": record.get("font_size", 11.0),
+                },
+            )
+
 
     def _commit_pending_annotations(self):
         annotations = self.view.export_annotations()
@@ -585,6 +1043,8 @@ class MainWindow(QMainWindow):
                     annotation["x"],
                     annotation["y"],
                     annotation.get("size", 15.0),
+                    annotation.get("color", "#dc0000"),
+                    annotation.get("line_width", 2.2),
                 )
             elif annotation["type"] == "text":
                 self.document.add_freetext_comment(
@@ -616,6 +1076,40 @@ class MainWindow(QMainWindow):
                     annotation.get("color", "red"),
                     annotation.get("line_width", 2.0),
                 )
+            elif annotation["type"] in {"rectangle", "ellipse"}:
+                self.document.add_shape(
+                    annotation["type"],
+                    annotation["page_index"],
+                    annotation["x"],
+                    annotation["y"],
+                    annotation.get("width", 80.0),
+                    annotation.get("height", 50.0),
+                    annotation.get("color", "red"),
+                    annotation.get("line_width", 2.0),
+                    annotation.get("text", ""),
+                    annotation.get("font_size", 11.0),
+                    annotation.get("text_color", "#000000"),
+                    annotation.get("fill_enabled", False),
+                    annotation.get("fill_opacity", 0.25),
+                    annotation.get("fill_color", "#ffff00"),
+                )
+            elif annotation["type"] == "cloud":
+                self.document.add_cloud(
+                    annotation["page_index"],
+                    annotation["x"],
+                    annotation["y"],
+                    annotation.get("width", 80.0),
+                    annotation.get("height", 50.0),
+                    annotation.get("color", "red"),
+                    annotation.get("line_width", 2.0),
+                    annotation.get("cloud_radius", 8.0),
+                    annotation.get("text", ""),
+                    annotation.get("font_size", 11.0),
+                    annotation.get("text_color", "#000000"),
+                    annotation.get("fill_enabled", False),
+                    annotation.get("fill_opacity", 0.25),
+                    annotation.get("fill_color", "#ffff00"),
+                )
 
         self.view.clear_pending_annotations()
         self.render_pipeline.invalidate()
@@ -638,7 +1132,13 @@ class MainWindow(QMainWindow):
         self.check_action.setEnabled(has_pdf)
         self.comment_action.setEnabled(has_pdf)
         self.date_stamp_action.setEnabled(has_pdf)
+        self.select_all_action.setEnabled(has_pdf)
+        self.copy_action.setEnabled(has_pdf)
+        self.paste_action.setEnabled(has_pdf)
         self.arrow_action.setEnabled(has_pdf)
+        self.rectangle_action.setEnabled(has_pdf)
+        self.ellipse_action.setEnabled(has_pdf)
+        self.cloud_action.setEnabled(has_pdf)
         if not has_pdf:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)

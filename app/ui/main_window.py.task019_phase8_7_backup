@@ -1544,10 +1544,6 @@ class MainWindow(QMainWindow):
         return settings
 
     def set_annotation_mode(self, mode):
-        if mode == "date_stamp":
-            self.view.set_date_stamp_preview_settings(
-                self.current_date_stamp_settings()
-            )
         self.view.set_annotation_mode(mode)
 
 
@@ -1597,13 +1593,6 @@ class MainWindow(QMainWindow):
             "date_stamp",
             memory_values,
         )
-
-        preview_settings = dict(memory_values)
-        preview_settings["date"] = (
-            self.stamp_date_edit.text().strip()
-            or date.today().strftime("'%y/%m/%d")
-        )
-        self.view.set_date_stamp_preview_settings(preview_settings)
 
         item = self.selected_date_stamp_item
         if item is None or item.scene() is None:
