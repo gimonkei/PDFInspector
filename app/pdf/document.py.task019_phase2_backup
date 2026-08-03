@@ -1,5 +1,7 @@
 import fitz
 
+from app.annotations.date_stamp import render_date_stamp_png
+
 
 class PDFDocumentError(Exception):
     """PDF操作に失敗したときの基底例外。"""
@@ -204,144 +206,28 @@ class PDFDocument:
     ):
         page = self.get_page(page_index)
         if page is None:
-            return
+            return None
 
         center = self._display_point_to_pdf(page, x, y)
         size = max(float(size), 42.0)
-        radius = size / 2.0
-        rgb = {
-            "black": (0.0, 0.0, 0.0),
-            "blue": (0.0, 0.27, 0.86),
-            "red": (0.86, 0.0, 0.0),
-        }.get(color, (0.0, 0.0, 0.0))
-
-        shape = page.new_shape()
-        shape.draw_circle(center, radius)
-        y1 = center.y - radius + size * 0.34
-        y2 = center.y - radius + size * 0.66
-        shape.draw_line((center.x - radius, y1), (center.x + radius, y1))
-        shape.draw_line((center.x - radius, y2), (center.x + radius, y2))
-        shape.finish(color=rgb, width=max(float(line_width), 0.5))
-        shape.commit()
-
-        font_size = max(6.0, size * 0.13)
-        text_rects = [
-            fitz.Rect(center.x - radius, center.y - radius, center.x + radius, y1),
-            fitz.Rect(center.x - radius, y1, center.x + radius, y2),
-            fitz.Rect(center.x - radius, y2, center.x + radius, center.y + radius),
-        ]
-        values = [str(top), str(date_text), str(bottom)]
-        for rect, value in zip(text_rects, values):
-            try:
-                page.insert_textbox(
-                    rect,
-                    value,
-                    fontsize=font_size,
-                    fontname="japan",
-                    color=rgb,
-                    align=fitz.TEXT_ALIGN_CENTER,
-                )
-            except Exception:
-                page.insert_textbox(
-                    rect,
-                    value,
-                    fontsize=font_size,
-                    fontname="helv",
-                    color=rgb,
-                    align=fitz.TEXT_ALIGN_CENTER,
-                )
-
-
-    def add_arrow(
-        self,
-        page_index,
-        start_x,
-        start_y,
-        end_x,
-        end_y,
-        color="red",
-        line_width=2.0,
-    ):
-        """Write a standard PDF line annotation with an arrow tip."""
-        page = self.get_page(page_index)
-        if page is None:
-            return None
-
-        start = self._display_point_to_pdf(page, start_x, start_y)
-        end = self._display_point_to_pdf(page, end_x, end_y)
-        rgb = {
-            "black": (0.0, 0.0, 0.0),
-            "blue": (0.0, 0.27, 0.86),
-            "red": (0.86, 0.0, 0.0),
-        }.get(str(color), (0.86, 0.0, 0.0))
-
-        annot = page.add_line_annot(start, end)
-        annot.set_colors(stroke=rgb)
-        annot.set_border(width=max(float(line_width), 0.5))
-
-        try:
-            annot.set_line_ends(
-                fitz.PDF_ANNOT_LE_NONE,
-                fitz.PDF_ANNOT_LE_OPEN_ARROW,
-            )
-        except Exception:
-            # Older PyMuPDF builds may not expose line-end constants. The
-            # line annotation remains valid and visible without this option.
-            pass
-
-        annot.set_info(
-            title="PDFInspector",
-            subject="矢印",
-            content="矢印",
+        half = size / 2.0
+        rect = fitz.Rect(
+            center.x - half,
+            center.y - half,
+            center.x + half,
+            center.y + half,
         )
-        annot.update()
-        return annot
-
-    def add_shape(
-        self,
-        shape_type,
-        page_index,
-        x,
-        y,
-        width,
-        height,
-        color="red",
-        line_width=2.0,
-    ):
-        """Write a standard PDF square or circle annotation."""
-        page = self.get_page(page_index)
-        if page is None:
-            return None
-
-        top_left = self._display_point_to_pdf(page, x, y)
-        bottom_right = self._display_point_to_pdf(
-            page,
-            x + width,
-            y + height,
-        )
-        rect = fitz.Rect(top_left, bottom_right).normalize()
-        rgb = {
-            "black": (0.0, 0.0, 0.0),
-            "blue": (0.0, 0.27, 0.86),
-            "red": (0.86, 0.0, 0.0),
-        }.get(str(color), (0.86, 0.0, 0.0))
-
-        if shape_type == "ellipse":
-            annot = page.add_circle_annot(rect)
-            subject = "円・楕円"
-        else:
-            annot = page.add_rect_annot(rect)
-            subject = "矩形"
-
-        annot.set_colors(stroke=rgb)
-        annot.set_border(width=max(float(line_width), 0.5))
-        annot.set_info(
-            title="PDFInspector",
-            subject=subject,
-            content=subject,
-        )
-        annot.update()
-        return annot
+        record = {
+            "top": str(top),
+            "date": str(date_text),
+            "bottom": str(bottom),
+            "color": str(color),
+            "size": size,
+            "line_width": float(line_width),
+        }
+        png = render_date_stamp_png(record, scale=4.0)
+        page.insert_image(rect, stream=png, overlay=True, keep_proportion=True)
+        return rect
 
     def rotate_page(self, index, angle):
         if self.doc is None:

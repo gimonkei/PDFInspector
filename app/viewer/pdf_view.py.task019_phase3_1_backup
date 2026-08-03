@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
 
 from app.viewer.graphics_view import GraphicsView
 from app.viewer.page_manager import PageManager
-from app.viewer.selection_overlay import SelectionOverlay
 from app.annotations.date_stamp import draw_date_stamp
 
 
@@ -113,8 +112,22 @@ class DateStampItem(QGraphicsObject):
         rect = self._stamp_rect()
         draw_date_stamp(painter, rect, self.record)
 
+        if self.isSelected():
+            selection_pen = QPen(QColor(40, 120, 230), 1.0, Qt.PenStyle.DashLine)
+            painter.setPen(selection_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+            painter.setPen(QPen(QColor(40, 120, 230), 1.0))
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            for handle in self._handle_rects().values():
+                painter.drawRect(handle)
 
     def _corner_at(self, position):
+        if not self.isSelected():
+            return None
+        for name, rect in self._handle_rects().items():
+            if rect.adjusted(-3, -3, 3, 3).contains(position):
+                return name
         return None
 
     def hoverMoveEvent(self, event):
@@ -260,8 +273,21 @@ class ArrowAnnotationItem(QGraphicsObject):
         painter.drawLine(end, wing1)
         painter.drawLine(end, wing2)
 
+        if self.isSelected():
+            painter.setPen(QPen(QColor(40, 120, 230), 1.0))
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            radius = self.HANDLE_RADIUS
+            painter.drawEllipse(start, radius, radius)
+            painter.drawEllipse(end, radius, radius)
 
     def _endpoint_at(self, pos):
+        if not self.isSelected():
+            return None
+        radius = self.HANDLE_RADIUS + 4.0
+        if (pos - QPointF(0.0, 0.0)).manhattanLength() <= radius * 2:
+            return "start"
+        if (pos - self._vector()).manhattanLength() <= radius * 2:
+            return "end"
         return None
 
     def hoverMoveEvent(self, event):
@@ -342,7 +368,6 @@ class ShapeAnnotationItem(QGraphicsObject):
         self._resize_start_scene = None
         self._resize_start_rect = None
         self._resize_start_pos = None
-        self._resize_anchor_scene = None
         self.setAcceptHoverEvents(True)
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable
@@ -393,6 +418,12 @@ class ShapeAnnotationItem(QGraphicsObject):
         }
 
     def _handle_at(self, pos):
+        if not self.isSelected():
+            return None
+        radius = self.HANDLE_RADIUS + 4.0
+        for name, point in self._handles().items():
+            if (pos - point).manhattanLength() <= radius * 2:
+                return name
         return None
 
     def paint(self, painter, option, widget=None):
@@ -413,6 +444,15 @@ class ShapeAnnotationItem(QGraphicsObject):
         else:
             painter.drawRect(self._rect())
 
+        if self.isSelected():
+            painter.setPen(QPen(QColor(40, 120, 230), 1.0))
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            for point in self._handles().values():
+                painter.drawEllipse(
+                    point,
+                    self.HANDLE_RADIUS,
+                    self.HANDLE_RADIUS,
+                )
 
     def hoverMoveEvent(self, event):
         if self._handle_at(event.pos()) is not None:
@@ -432,18 +472,6 @@ class ShapeAnnotationItem(QGraphicsObject):
             self._resize_start_scene = event.scenePos()
             self._resize_start_rect = QRectF(self._rect())
             self._resize_start_pos = QPointF(self.pos())
-
-            # Keep the diagonally opposite corner fixed in scene coordinates.
-            # Resizing is then calculated directly from the cursor's current
-            # scene position, so the handle remains under the cursor at every
-            # zoom level and for very large circles.
-            opposite = {
-                "top_left": self._rect().bottomRight(),
-                "top_right": self._rect().bottomLeft(),
-                "bottom_left": self._rect().topRight(),
-                "bottom_right": self._rect().topLeft(),
-            }[handle]
-            self._resize_anchor_scene = self.mapToScene(opposite)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -453,44 +481,30 @@ class ShapeAnnotationItem(QGraphicsObject):
             super().mouseMoveEvent(event)
             return
 
-        current_scene = event.scenePos()
-        anchor = QPointF(self._resize_anchor_scene)
+        delta = event.scenePos() - self._resize_start_scene
+        rect = QRectF(self._resize_start_rect)
+        item_pos = QPointF(self._resize_start_pos)
 
-        left = min(anchor.x(), current_scene.x())
-        top = min(anchor.y(), current_scene.y())
-        right = max(anchor.x(), current_scene.x())
-        bottom = max(anchor.y(), current_scene.y())
+        if "left" in self._resize_handle:
+            new_width = max(self.MIN_SIZE, rect.width() - delta.x())
+            actual_dx = rect.width() - new_width
+            item_pos.setX(self._resize_start_pos.x() + actual_dx)
+            rect.setWidth(new_width)
+        else:
+            rect.setWidth(max(self.MIN_SIZE, rect.width() + delta.x()))
 
-        width = right - left
-        height = bottom - top
-
-        # Clamp without allowing the active handle to drift away from the
-        # cursor. The fixed opposite corner remains unchanged.
-        if width < self.MIN_SIZE:
-            if current_scene.x() < anchor.x():
-                left = anchor.x() - self.MIN_SIZE
-                right = anchor.x()
-            else:
-                left = anchor.x()
-                right = anchor.x() + self.MIN_SIZE
-
-        if height < self.MIN_SIZE:
-            if current_scene.y() < anchor.y():
-                top = anchor.y() - self.MIN_SIZE
-                bottom = anchor.y()
-            else:
-                top = anchor.y()
-                bottom = anchor.y() + self.MIN_SIZE
-
-        scene_rect = QRectF(
-            QPointF(left, top),
-            QPointF(right, bottom),
-        ).normalized()
+        if "top" in self._resize_handle:
+            new_height = max(self.MIN_SIZE, rect.height() - delta.y())
+            actual_dy = rect.height() - new_height
+            item_pos.setY(self._resize_start_pos.y() + actual_dy)
+            rect.setHeight(new_height)
+        else:
+            rect.setHeight(max(self.MIN_SIZE, rect.height() + delta.y()))
 
         self.prepareGeometryChange()
-        self.setPos(scene_rect.topLeft())
-        self.record["width"] = float(scene_rect.width())
-        self.record["height"] = float(scene_rect.height())
+        self.setPos(item_pos)
+        self.record["width"] = float(rect.width())
+        self.record["height"] = float(rect.height())
         self.update()
         event.accept()
 
@@ -500,7 +514,6 @@ class ShapeAnnotationItem(QGraphicsObject):
             self._resize_start_scene = None
             self._resize_start_rect = None
             self._resize_start_pos = None
-            self._resize_anchor_scene = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -526,11 +539,6 @@ class PDFView(GraphicsView):
         super().__init__()
         self.scene = QGraphicsScene()
         self.setScene(self.scene)
-        self._selection_overlay = SelectionOverlay(self)
-        self.scene.addItem(self._selection_overlay)
-        self.scene.selectionChanged.connect(
-            self._on_scene_selection_changed
-        )
         self.page_manager = PageManager()
         self.pages = []
         self.current_page_index = 0
@@ -577,35 +585,6 @@ class PDFView(GraphicsView):
         self.horizontalScrollBar().valueChanged.connect(
             self._schedule_visible_region_changed
         )
-
-
-    def _on_scene_selection_changed(self):
-        selected = [
-            item
-            for item in self.scene.selectedItems()
-            if hasattr(item, "record")
-        ]
-        self._selection_overlay.set_target(
-            selected[0] if selected else None
-        )
-
-    def _refresh_selection_overlay(self):
-        if self._selection_overlay is not None:
-            self._selection_overlay.refresh_geometry()
-
-    def _detach_selection_overlay(self):
-        if (
-            self._selection_overlay is not None
-            and self._selection_overlay.scene() is self.scene
-        ):
-            self.scene.removeItem(self._selection_overlay)
-
-    def _reattach_selection_overlay(self):
-        if self._selection_overlay is None:
-            self._selection_overlay = SelectionOverlay(self)
-        if self._selection_overlay.scene() is None:
-            self.scene.addItem(self._selection_overlay)
-        self._selection_overlay.clear_target()
 
     def _history_snapshot(self):
         self._sync_annotation_records()
@@ -933,7 +912,6 @@ class PDFView(GraphicsView):
         item.setZValue(float(record.get("z", 20.0)))
         self.scene.addItem(item)
         self._annotation_items.append(item)
-        self._refresh_selection_overlay()
         return item
 
     def _sync_annotation_records(self):
@@ -944,7 +922,6 @@ class PDFView(GraphicsView):
                 continue
             record["x"] = float(item.pos().x() - origin[0])
             record["y"] = float(item.pos().y() - origin[1])
-        self._refresh_selection_overlay()
 
     def _remove_annotation_items(self):
         for item in list(self._annotation_items):
@@ -1009,25 +986,6 @@ class PDFView(GraphicsView):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            scene_point = self.mapToScene(
-                event.position().toPoint()
-            )
-
-            # Selection handles always have the highest priority. Without
-            # this branch, PDFView can start drawing a new circle before the
-            # scene has a chance to deliver the event to SelectionOverlay.
-            overlay_handle = (
-                self._selection_overlay.handle_at_scene_point(
-                    scene_point
-                )
-                if self._selection_overlay is not None
-                else None
-            )
-            if overlay_handle is not None:
-                self.finish_property_edit()
-                QGraphicsView.mousePressEvent(self, event)
-                return
-
             nearby = self._annotation_item_near(event.position().toPoint())
             if nearby is not None:
                 self.finish_property_edit()
@@ -1038,7 +996,9 @@ class PDFView(GraphicsView):
                 QGraphicsView.mousePressEvent(self, event)
                 return
 
-            hit = self._page_point_at(scene_point)
+            hit = self._page_point_at(
+                self.mapToScene(event.position().toPoint())
+            )
 
             if (
                 self.annotation_mode in {"rectangle", "ellipse"}
@@ -1127,9 +1087,7 @@ class PDFView(GraphicsView):
             self._arrow_preview.setLine(line)
             event.accept()
             return
-
         super().mouseMoveEvent(event)
-        self._refresh_selection_overlay()
 
     def mouseReleaseEvent(self, event):
         if (
@@ -1207,7 +1165,6 @@ class PDFView(GraphicsView):
             else super().mouseReleaseEvent(event)
         )
         self._sync_annotation_records()
-        self._refresh_selection_overlay()
         before = self._gesture_before
         self._gesture_before = None
         self._commit_history_change(before)
@@ -1274,9 +1231,7 @@ class PDFView(GraphicsView):
     def clear_pages(self):
         self._sync_annotation_records()
         self._annotation_items.clear()
-        self._detach_selection_overlay()
         self.scene.clear()
-        self._reattach_selection_overlay()
         self.page_manager.clear()
         self._page_items.clear()
         self._page_origins.clear()

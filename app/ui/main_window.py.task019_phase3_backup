@@ -188,32 +188,6 @@ class MainWindow(QMainWindow):
             shape_menu = QMenu(self.shape_tool_button)
             self.shape_tool_button.setMenu(shape_menu)
         shape_menu.addAction(self.arrow_action)
-
-        self.rectangle_action = QAction("□ 矩形", self)
-        self.rectangle_action.setCheckable(True)
-        self.rectangle_action.setToolTip(
-            "ページ上をドラッグして矩形を追加"
-        )
-        self.rectangle_action.triggered.connect(
-            lambda: self.set_annotation_mode("rectangle")
-        )
-        self.annotation_group.addAction(self.rectangle_action)
-        shape_menu.addAction(self.rectangle_action)
-
-        self.ellipse_action = QAction("○ 円・楕円", self)
-        self.ellipse_action.setCheckable(True)
-        self.ellipse_action.setToolTip(
-            "ページ上をドラッグして円・楕円を追加"
-        )
-        self.ellipse_action.triggered.connect(
-            lambda: self.set_annotation_mode("ellipse")
-        )
-        self.annotation_group.addAction(self.ellipse_action)
-        shape_menu.addAction(self.ellipse_action)
-
-        shape_menu.triggered.connect(
-            self._set_shape_default_action
-        )
         toolbar.addWidget(self.shape_tool_button)
         toolbar.addSeparator()
 
@@ -323,14 +297,6 @@ class MainWindow(QMainWindow):
     def on_redo_available_changed(self, available):
         if hasattr(self, "redo_action"):
             self.redo_action.setEnabled(bool(available))
-
-    def _set_shape_default_action(self, action):
-        if action in {
-            self.arrow_action,
-            self.rectangle_action,
-            self.ellipse_action,
-        }:
-            self.shape_tool_button.setDefaultAction(action)
 
     def _set_mark_default_action(self, action):
         """Remember the last mark tool as the split button's main action."""
@@ -650,17 +616,6 @@ class MainWindow(QMainWindow):
                     annotation.get("color", "red"),
                     annotation.get("line_width", 2.0),
                 )
-            elif annotation["type"] in {"rectangle", "ellipse"}:
-                self.document.add_shape(
-                    annotation["type"],
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation.get("width", 80.0),
-                    annotation.get("height", 50.0),
-                    annotation.get("color", "red"),
-                    annotation.get("line_width", 2.0),
-                )
 
         self.view.clear_pending_annotations()
         self.render_pipeline.invalidate()
@@ -684,8 +639,6 @@ class MainWindow(QMainWindow):
         self.comment_action.setEnabled(has_pdf)
         self.date_stamp_action.setEnabled(has_pdf)
         self.arrow_action.setEnabled(has_pdf)
-        self.rectangle_action.setEnabled(has_pdf)
-        self.ellipse_action.setEnabled(has_pdf)
         if not has_pdf:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)

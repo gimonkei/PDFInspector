@@ -297,52 +297,6 @@ class PDFDocument:
         annot.update()
         return annot
 
-    def add_shape(
-        self,
-        shape_type,
-        page_index,
-        x,
-        y,
-        width,
-        height,
-        color="red",
-        line_width=2.0,
-    ):
-        """Write a standard PDF square or circle annotation."""
-        page = self.get_page(page_index)
-        if page is None:
-            return None
-
-        top_left = self._display_point_to_pdf(page, x, y)
-        bottom_right = self._display_point_to_pdf(
-            page,
-            x + width,
-            y + height,
-        )
-        rect = fitz.Rect(top_left, bottom_right).normalize()
-        rgb = {
-            "black": (0.0, 0.0, 0.0),
-            "blue": (0.0, 0.27, 0.86),
-            "red": (0.86, 0.0, 0.0),
-        }.get(str(color), (0.86, 0.0, 0.0))
-
-        if shape_type == "ellipse":
-            annot = page.add_circle_annot(rect)
-            subject = "円・楕円"
-        else:
-            annot = page.add_rect_annot(rect)
-            subject = "矩形"
-
-        annot.set_colors(stroke=rgb)
-        annot.set_border(width=max(float(line_width), 0.5))
-        annot.set_info(
-            title="PDFInspector",
-            subject=subject,
-            content=subject,
-        )
-        annot.update()
-        return annot
-
     def rotate_page(self, index, angle):
         if self.doc is None:
             return

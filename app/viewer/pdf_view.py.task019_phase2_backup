@@ -1,5 +1,7 @@
+from copy import deepcopy
+
 from PySide6.QtCore import QPointF, QRectF, QTimer, Signal, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -179,6 +181,8 @@ class PDFView(GraphicsView):
     annotation_clicked = Signal(int, QPointF)
     annotation_edit_requested = Signal(object)
     annotation_selected = Signal(object)
+    undo_available_changed = Signal(bool)
+    redo_available_changed = Signal(bool)
 
     PAGE_MARGIN = 20.0
     PREFETCH_VIEWPORTS = 0.65
@@ -201,6 +205,20 @@ class PDFView(GraphicsView):
         self._annotation_items = []
         self._annotation_dragging = False
 
+        # Annotation undo / redo uses complete lightweight record snapshots.
+        # This keeps every annotation type consistent and also covers move,
+        # resize, delete, text edits, and property-panel edits.
+        self._undo_stack = []
+        self._redo_stack = []
+        self._history_limit = 100
+        self._history_suspended = False
+        self._gesture_before = None
+        self._property_edit_before = None
+        self._property_edit_timer = QTimer(self)
+        self._property_edit_timer.setSingleShot(True)
+        self._property_edit_timer.setInterval(400)
+        self._property_edit_timer.timeout.connect(self.finish_property_edit)
+
         self._visible_signal_timer = QTimer(self)
         self._visible_signal_timer.setSingleShot(True)
         self._visible_signal_timer.setInterval(40)
@@ -212,6 +230,101 @@ class PDFView(GraphicsView):
         self.horizontalScrollBar().valueChanged.connect(
             self._schedule_visible_region_changed
         )
+
+    def _history_snapshot(self):
+        self._sync_annotation_records()
+        return deepcopy(self._annotation_records)
+
+    def _emit_history_state(self):
+        self.undo_available_changed.emit(bool(self._undo_stack))
+        self.redo_available_changed.emit(bool(self._redo_stack))
+
+    def _commit_history_change(self, before):
+        if self._history_suspended or before is None:
+            return
+        after = self._history_snapshot()
+        if before == after:
+            return
+        self._undo_stack.append(deepcopy(before))
+        if len(self._undo_stack) > self._history_limit:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._emit_history_state()
+
+    def reset_annotation_history(self):
+        self._property_edit_timer.stop()
+        self._gesture_before = None
+        self._property_edit_before = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._emit_history_state()
+
+    def _restore_history_snapshot(self, snapshot):
+        self._history_suspended = True
+        try:
+            self._annotation_records = deepcopy(snapshot)
+            self.scene.clearSelection()
+            self._restore_annotation_items()
+        finally:
+            self._history_suspended = False
+        self.annotation_selected.emit(None)
+
+    def finish_property_edit(self):
+        before = self._property_edit_before
+        self._property_edit_before = None
+        self._commit_history_change(before)
+
+    def undo_annotations(self):
+        self.finish_property_edit()
+        if not self._undo_stack:
+            return
+        current = self._history_snapshot()
+        target = self._undo_stack.pop()
+        self._redo_stack.append(current)
+        self._restore_history_snapshot(target)
+        self._emit_history_state()
+
+    def redo_annotations(self):
+        self.finish_property_edit()
+        if not self._redo_stack:
+            return
+        current = self._history_snapshot()
+        target = self._redo_stack.pop()
+        self._undo_stack.append(current)
+        self._restore_history_snapshot(target)
+        self._emit_history_state()
+
+    def update_annotation_record(self, item, changes, merge_property_edits=False):
+        if item is None or item.scene() is None:
+            return
+        if merge_property_edits:
+            if self._property_edit_before is None:
+                self._property_edit_before = self._history_snapshot()
+            item.record.update(changes)
+            if hasattr(item, "refresh_from_record"):
+                item.refresh_from_record()
+            self._property_edit_timer.start()
+            return
+        before = self._history_snapshot()
+        item.record.update(changes)
+        if hasattr(item, "setPlainText") and "text" in changes:
+            item.setPlainText(str(changes["text"]))
+        if hasattr(item, "refresh_from_record"):
+            item.refresh_from_record()
+        self._commit_history_change(before)
+
+    def remove_annotation_item(self, item):
+        if item is None or not hasattr(item, "record"):
+            return
+        before = self._history_snapshot()
+        record = item.record
+        if record in self._annotation_records:
+            self._annotation_records.remove(record)
+        if item in self._annotation_items:
+            self._annotation_items.remove(item)
+        if item.scene() is self.scene:
+            self.scene.removeItem(item)
+        self._commit_history_change(before)
 
     def set_annotation_mode(self, mode):
         if mode not in {"hand", "check", "comment", "date_stamp"}:
@@ -241,6 +354,7 @@ class PDFView(GraphicsView):
         return None
 
     def add_check_overlay(self, page_index, point):
+        before = self._history_snapshot()
         record = {
             "type": "check",
             "page_index": int(page_index),
@@ -250,8 +364,10 @@ class PDFView(GraphicsView):
         }
         self._annotation_records.append(record)
         self._create_annotation_item(record)
+        self._commit_history_change(before)
 
     def add_text_overlay(self, page_index, point, text):
+        before = self._history_snapshot()
         record = {
             "type": "text",
             "page_index": int(page_index),
@@ -264,8 +380,10 @@ class PDFView(GraphicsView):
             return
         self._annotation_records.append(record)
         self._create_annotation_item(record)
+        self._commit_history_change(before)
 
     def add_date_stamp_overlay(self, page_index, point, settings):
+        before = self._history_snapshot()
         record = {
             "type": "date_stamp",
             "page_index": int(page_index),
@@ -284,6 +402,7 @@ class PDFView(GraphicsView):
             self.scene.clearSelection()
             item.setSelected(True)
             self.annotation_selected.emit(item)
+        self._commit_history_change(before)
         return item
 
     def _create_annotation_item(self, record):
@@ -331,6 +450,7 @@ class PDFView(GraphicsView):
     def clear_pending_annotations(self):
         self._remove_annotation_items()
         self._annotation_records.clear()
+        self.reset_annotation_history()
 
     def delete_selected_annotations(self):
         selected = [
@@ -338,6 +458,9 @@ class PDFView(GraphicsView):
             for item in self.scene.selectedItems()
             if hasattr(item, "record")
         ]
+        if not selected:
+            return
+        before = self._history_snapshot()
         for item in selected:
             record = item.record
             if record in self._annotation_records:
@@ -345,6 +468,8 @@ class PDFView(GraphicsView):
             if item in self._annotation_items:
                 self._annotation_items.remove(item)
             self.scene.removeItem(item)
+        self.annotation_selected.emit(None)
+        self._commit_history_change(before)
 
     def _annotation_item_near(self, viewport_pos, radius=10):
         direct = self.itemAt(viewport_pos)
@@ -371,6 +496,8 @@ class PDFView(GraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             nearby = self._annotation_item_near(event.position().toPoint())
             if nearby is not None:
+                self.finish_property_edit()
+                self._gesture_before = self._history_snapshot()
                 self.scene.clearSelection()
                 nearby.setSelected(True)
                 self.annotation_selected.emit(nearby)
@@ -389,6 +516,9 @@ class PDFView(GraphicsView):
     def mouseReleaseEvent(self, event):
         QGraphicsView.mouseReleaseEvent(self, event) if self.scene.selectedItems() else super().mouseReleaseEvent(event)
         self._sync_annotation_records()
+        before = self._gesture_before
+        self._gesture_before = None
+        self._commit_history_change(before)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -403,6 +533,14 @@ class PDFView(GraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo_annotations()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self.redo_annotations()
+            event.accept()
+            return
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
             self.delete_selected_annotations()
             event.accept()

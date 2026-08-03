@@ -1009,25 +1009,6 @@ class PDFView(GraphicsView):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            scene_point = self.mapToScene(
-                event.position().toPoint()
-            )
-
-            # Selection handles always have the highest priority. Without
-            # this branch, PDFView can start drawing a new circle before the
-            # scene has a chance to deliver the event to SelectionOverlay.
-            overlay_handle = (
-                self._selection_overlay.handle_at_scene_point(
-                    scene_point
-                )
-                if self._selection_overlay is not None
-                else None
-            )
-            if overlay_handle is not None:
-                self.finish_property_edit()
-                QGraphicsView.mousePressEvent(self, event)
-                return
-
             nearby = self._annotation_item_near(event.position().toPoint())
             if nearby is not None:
                 self.finish_property_edit()
@@ -1038,7 +1019,9 @@ class PDFView(GraphicsView):
                 QGraphicsView.mousePressEvent(self, event)
                 return
 
-            hit = self._page_point_at(scene_point)
+            hit = self._page_point_at(
+                self.mapToScene(event.position().toPoint())
+            )
 
             if (
                 self.annotation_mode in {"rectangle", "ellipse"}

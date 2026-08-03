@@ -39,7 +39,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("PDFInspector")
         self.resize(1200, 800)
-        self.setAcceptDrops(True)
 
         self.document = PDFDocument()
         self.renderer = PDFRenderer()
@@ -163,58 +162,6 @@ class MainWindow(QMainWindow):
         mark_menu.addAction(self.date_stamp_action)
         mark_menu.triggered.connect(self._set_mark_default_action)
         toolbar.addWidget(self.mark_tool_button)
-
-        self.arrow_action = QAction("➜ 矢印", self)
-        self.arrow_action.setCheckable(True)
-        self.arrow_action.setToolTip(
-            "ページ上をドラッグして矢印を追加"
-        )
-        self.arrow_action.triggered.connect(
-            lambda: self.set_annotation_mode("arrow")
-        )
-        self.annotation_group.addAction(self.arrow_action)
-
-        self.shape_tool_button = QToolButton(toolbar)
-        self.shape_tool_button.setPopupMode(
-            QToolButton.ToolButtonPopupMode.MenuButtonPopup
-        )
-        self.shape_tool_button.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        )
-        self.shape_tool_button.setDefaultAction(self.arrow_action)
-        shape_menu = self.shape_tool_button.menu()
-        if shape_menu is None:
-            from PySide6.QtWidgets import QMenu
-            shape_menu = QMenu(self.shape_tool_button)
-            self.shape_tool_button.setMenu(shape_menu)
-        shape_menu.addAction(self.arrow_action)
-
-        self.rectangle_action = QAction("□ 矩形", self)
-        self.rectangle_action.setCheckable(True)
-        self.rectangle_action.setToolTip(
-            "ページ上をドラッグして矩形を追加"
-        )
-        self.rectangle_action.triggered.connect(
-            lambda: self.set_annotation_mode("rectangle")
-        )
-        self.annotation_group.addAction(self.rectangle_action)
-        shape_menu.addAction(self.rectangle_action)
-
-        self.ellipse_action = QAction("○ 円・楕円", self)
-        self.ellipse_action.setCheckable(True)
-        self.ellipse_action.setToolTip(
-            "ページ上をドラッグして円・楕円を追加"
-        )
-        self.ellipse_action.triggered.connect(
-            lambda: self.set_annotation_mode("ellipse")
-        )
-        self.annotation_group.addAction(self.ellipse_action)
-        shape_menu.addAction(self.ellipse_action)
-
-        shape_menu.triggered.connect(
-            self._set_shape_default_action
-        )
-        toolbar.addWidget(self.shape_tool_button)
         toolbar.addSeparator()
 
         self.undo_action = QAction("↶ 元に戻す", self)
@@ -323,14 +270,6 @@ class MainWindow(QMainWindow):
     def on_redo_available_changed(self, available):
         if hasattr(self, "redo_action"):
             self.redo_action.setEnabled(bool(available))
-
-    def _set_shape_default_action(self, action):
-        if action in {
-            self.arrow_action,
-            self.rectangle_action,
-            self.ellipse_action,
-        }:
-            self.shape_tool_button.setDefaultAction(action)
 
     def _set_mark_default_action(self, action):
         """Remember the last mark tool as the split button's main action."""
@@ -640,27 +579,6 @@ class MainWindow(QMainWindow):
                     annotation.get("size", 72.0),
                     annotation.get("line_width", 1.5),
                 )
-            elif annotation["type"] == "arrow":
-                self.document.add_arrow(
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation["x"] + annotation.get("dx", 80.0),
-                    annotation["y"] + annotation.get("dy", 0.0),
-                    annotation.get("color", "red"),
-                    annotation.get("line_width", 2.0),
-                )
-            elif annotation["type"] in {"rectangle", "ellipse"}:
-                self.document.add_shape(
-                    annotation["type"],
-                    annotation["page_index"],
-                    annotation["x"],
-                    annotation["y"],
-                    annotation.get("width", 80.0),
-                    annotation.get("height", 50.0),
-                    annotation.get("color", "red"),
-                    annotation.get("line_width", 2.0),
-                )
 
         self.view.clear_pending_annotations()
         self.render_pipeline.invalidate()
@@ -683,9 +601,6 @@ class MainWindow(QMainWindow):
         self.check_action.setEnabled(has_pdf)
         self.comment_action.setEnabled(has_pdf)
         self.date_stamp_action.setEnabled(has_pdf)
-        self.arrow_action.setEnabled(has_pdf)
-        self.rectangle_action.setEnabled(has_pdf)
-        self.ellipse_action.setEnabled(has_pdf)
         if not has_pdf:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
@@ -799,11 +714,8 @@ class MainWindow(QMainWindow):
             "",
             "PDF (*.pdf)",
         )
-        if path:
-            self.open_pdf_path(path)
-
-    def open_pdf_path(self, path):
-        path = str(Path(path))
+        if not path:
+            return
         try:
             self.document.open(path)
             self.selected_date_stamp_item = None
@@ -814,79 +726,11 @@ class MainWindow(QMainWindow):
             self.current_page = 0
             self.show_document()
             self.view.fit_to_width()
-            self.setWindowTitle(f"{Path(path).name} - PDFInspector")
-            return True
         except PDFOpenError as error:
             QMessageBox.critical(
                 self,
                 "PDFを開けません",
                 str(error),
-            )
-            return False
-
-    @staticmethod
-    def _dropped_local_paths(mime_data):
-        paths = []
-        if not mime_data.hasUrls():
-            return paths
-        for url in mime_data.urls():
-            if not url.isLocalFile():
-                continue
-            local_path = Path(url.toLocalFile())
-            if local_path.is_file():
-                paths.append(local_path)
-        return paths
-
-    def dragEnterEvent(self, event):
-        paths = self._dropped_local_paths(event.mimeData())
-        if any(path.suffix.lower() == ".pdf" for path in paths):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        paths = self._dropped_local_paths(event.mimeData())
-        if any(path.suffix.lower() == ".pdf" for path in paths):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        paths = self._dropped_local_paths(event.mimeData())
-        pdf_paths = [path for path in paths if path.suffix.lower() == ".pdf"]
-        unsupported = [path for path in paths if path.suffix.lower() != ".pdf"]
-
-        if not pdf_paths:
-            QMessageBox.information(
-                self,
-                "ファイルを開けません",
-                "PDFファイルをドロップしてください。",
-            )
-            event.ignore()
-            return
-
-        # The current application is still single-document. Open the first
-        # dropped PDF now; Task020 multi-tab support will open every PDF in
-        # its own tab without changing this drop interface.
-        opened = self.open_pdf_path(pdf_paths[0])
-        if opened:
-            event.acceptProposedAction()
-
-        messages = []
-        if len(pdf_paths) > 1:
-            messages.append(
-                f"現在は1ファイル表示のため、先頭のPDFだけ開きました。"
-                f"\n残り {len(pdf_paths) - 1} ファイルはマルチタブ対応時に開けるようになります。"
-            )
-        if unsupported:
-            messages.append(
-                f"PDF以外の {len(unsupported)} ファイルは開きませんでした。"
-            )
-        if messages:
-            QMessageBox.information(
-                self,
-                "ドラッグ＆ドロップ",
-                "\n\n".join(messages),
             )
 
     def next_page(self):
