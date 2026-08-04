@@ -55,6 +55,7 @@ class RenderRequest:
     regions: tuple[PageRenderRegion, ...]
     zoom_factor: float
     device_pixel_ratio: float
+    render_scale_override: float | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,9 @@ class RenderWorker(QRunnable):
                 page_regions,
                 self.request.zoom_factor,
                 self.request.device_pixel_ratio,
+                render_scale_override=(
+                    self.request.render_scale_override
+                ),
             )
             result = RenderResult(
                 generation=self.request.generation,
@@ -163,19 +167,41 @@ class RenderPipeline(QObject):
         page_regions: dict[int, QRectF],
         zoom_factor: float,
         device_pixel_ratio: float = 1.0,
+        render_scale_override=None,
     ) -> RenderRequest:
         generation = self.invalidate()
         regions = tuple(
-            PageRenderRegion.from_qrect(page_index, rect)
-            for page_index, rect in sorted(page_regions.items())
+            PageRenderRegion.from_qrect(
+                page_index,
+                rect,
+            )
+            for page_index, rect in sorted(
+                page_regions.items()
+            )
             if not rect.isEmpty()
         )
+
+        override = None
+        if render_scale_override is not None:
+            override = max(
+                float(render_scale_override),
+                0.5,
+            )
+
         return RenderRequest(
             generation=generation,
             regions=regions,
-            zoom_factor=max(float(zoom_factor), 0.01),
-            device_pixel_ratio=max(float(device_pixel_ratio), 1.0),
+            zoom_factor=max(
+                float(zoom_factor),
+                0.01,
+            ),
+            device_pixel_ratio=max(
+                float(device_pixel_ratio),
+                1.0,
+            ),
+            render_scale_override=override,
         )
+
 
     def submit(self, document, request: RenderRequest):
         """

@@ -1,9 +1,12 @@
+from copy import deepcopy
 from datetime import date
+from time import perf_counter
 import json
+import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence
+from PySide6.QtCore import QMimeData, QStandardPaths, Qt, QTimer, QSize
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDrag, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -19,11 +22,21 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QInputDialog,
     QHBoxLayout,
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QTabBar,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
+    QFrame,
+    QScrollArea,
+    QHBoxLayout,
     QToolBar,
     QTextEdit,
     QToolButton,
@@ -238,6 +251,7 @@ class AnnotationPropertiesPanel(QWidget):
         "rectangle": "矩形",
         "ellipse": "円・楕円",
         "cloud": "クラウド",
+        "freehand": "手書き",
     }
 
     def __init__(self, main_window):
@@ -339,7 +353,7 @@ class AnnotationPropertiesPanel(QWidget):
                 " pt",
             )
 
-        elif record_type == "arrow":
+        elif record_type in {"arrow", "freehand"}:
             self._add_color("color", "色", record.get("color", "#dc0000"))
             self.line_width_spin = self._add_double(
                 "太さ",
@@ -515,7 +529,7 @@ class AnnotationPropertiesPanel(QWidget):
         self._loading = False
 
     def _connect_live_signals(self, record_type):
-        if record_type in {"check", "arrow", "ellipse", "rectangle", "cloud"}:
+        if record_type in {"check", "arrow", "freehand", "ellipse", "rectangle", "cloud"}:
             if hasattr(self, "line_width_spin"):
                 self.line_width_spin.valueChanged.connect(
                     self._apply_numeric_change
@@ -710,10 +724,15 @@ class AnnotationPropertiesPanel(QWidget):
                 "line_width": self.line_width_spin.value(),
             }
             view.update_arrow_properties(item, **values)
-            self.main_window._remember_annotation_defaults(
-                "arrow",
-                values,
-            )
+            self.main_window._remember_annotation_defaults("arrow", values)
+
+        elif record_type == "freehand":
+            values = {
+                "color": self._color_name("color", "#dc0000"),
+                "line_width": self.line_width_spin.value(),
+            }
+            view.update_freehand_properties(item, **values)
+            self.main_window._remember_annotation_defaults("freehand", values)
 
         elif record_type in {"rectangle", "cloud", "ellipse"}:
             text = (
@@ -810,6 +829,1171 @@ class AnnotationPropertiesPanel(QWidget):
 
 
 
+class MultiAnnotationPropertiesPanel(QWidget):
+    """Common-property editor for two or more selected annotations."""
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self._loading = False
+        self._color_values = {}
+
+        layout = QVBoxLayout(self)
+
+        self.title_label = QLabel("複数選択", self)
+        self.title_label.setStyleSheet(
+            "font-weight: bold; padding: 4px;"
+        )
+        layout.addWidget(self.title_label)
+
+        self.count_label = QLabel("", self)
+        layout.addWidget(self.count_label)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self._add_color_button(
+            form,
+            "color",
+            "線・印の色",
+            "#dc0000",
+        )
+
+        self.line_width_spin = QDoubleSpinBox(self)
+        self.line_width_spin.setRange(0.5, 10.0)
+        self.line_width_spin.setSingleStep(0.5)
+        self.line_width_spin.setDecimals(1)
+        self.line_width_spin.setSuffix(" pt")
+        self.line_width_spin.setValue(2.0)
+        form.addRow("線幅:", self.line_width_spin)
+
+        self.fill_check = QCheckBox("塗りつぶす", self)
+        form.addRow("背景:", self.fill_check)
+
+        self._add_color_button(
+            form,
+            "fill_color",
+            "塗りつぶし色",
+            "#ffff00",
+        )
+
+        self.opacity_spin = QDoubleSpinBox(self)
+        self.opacity_spin.setRange(0.0, 100.0)
+        self.opacity_spin.setSingleStep(5.0)
+        self.opacity_spin.setDecimals(0)
+        self.opacity_spin.setSuffix(" %")
+        self.opacity_spin.setValue(25.0)
+        form.addRow("濃度:", self.opacity_spin)
+
+        self._add_color_button(
+            form,
+            "text_color",
+            "文字色",
+            "#000000",
+        )
+
+        note = QLabel(
+            "対応していない項目は、その注釈では変更されません。",
+            self,
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+
+        self.line_width_spin.valueChanged.connect(
+            self._apply_common
+        )
+        self.fill_check.toggled.connect(
+            self._apply_common
+        )
+        self.opacity_spin.valueChanged.connect(
+            self._apply_common
+        )
+
+    def _add_color_button(
+        self,
+        form,
+        key,
+        label,
+        default,
+    ):
+        color = QColor(default)
+        self._color_values[key] = color
+
+        button = QPushButton(self)
+        button.clicked.connect(
+            lambda checked=False, k=key, b=button:
+                self._choose_color(k, b)
+        )
+        _set_color_button(button, color)
+        setattr(self, f"{key}_button", button)
+        form.addRow(f"{label}:", button)
+
+    def _choose_color(self, key, button):
+        current = self._color_values[key]
+        selected = QColorDialog.getColor(
+            current,
+            self,
+            "色を選択",
+        )
+        if not selected.isValid():
+            return
+
+        selected.setAlpha(255)
+        self._color_values[key] = selected
+        _set_color_button(button, selected)
+        self._apply_common()
+
+    def set_selection_count(self, count):
+        self.count_label.setText(
+            f"{int(count)}個の注釈を選択中"
+        )
+
+    def _color_name(self, key):
+        return self._color_values[key].name(
+            QColor.NameFormat.HexRgb
+        )
+
+    def _apply_common(self, *args):
+        if self._loading:
+            return
+
+        self.main_window.view.update_selected_common_properties(
+            color=self._color_name("color"),
+            line_width=self.line_width_spin.value(),
+            fill_enabled=self.fill_check.isChecked(),
+            fill_color=self._color_name("fill_color"),
+            fill_opacity=self.opacity_spin.value() / 100.0,
+            text_color=self._color_name("text_color"),
+        )
+
+
+
+class AnnotationLayerPanel(QWidget):
+    TYPE_NAMES = {
+        "check": "チェック",
+        "text": "コメント",
+        "date_stamp": "デート印",
+        "arrow": "矢印",
+        "rectangle": "矩形",
+        "ellipse": "円・楕円",
+        "cloud": "クラウド",
+        "freehand": "手書き",
+    }
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self._loading = False
+        self._record_signature = None
+
+        layout = QVBoxLayout(self)
+
+        self.summary_label = QLabel(
+            "注釈 0件",
+            self,
+        )
+        self.summary_label.setStyleSheet(
+            "font-weight: bold; padding: 4px;"
+        )
+        layout.addWidget(self.summary_label)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.setSelectionMode(
+            QListWidget.SelectionMode.SingleSelection
+        )
+        self.list_widget.itemClicked.connect(
+            self._on_item_clicked
+        )
+        self.list_widget.itemDoubleClicked.connect(
+            self._on_item_double_clicked
+        )
+        self.list_widget.itemChanged.connect(
+            self._on_item_changed
+        )
+        layout.addWidget(self.list_widget, 1)
+
+        order_layout = QHBoxLayout()
+
+        self.front_button = QPushButton("最前面", self)
+        self.forward_button = QPushButton("前へ", self)
+        self.backward_button = QPushButton("後ろへ", self)
+        self.back_button = QPushButton("最背面", self)
+
+        order_layout.addWidget(self.front_button)
+        order_layout.addWidget(self.forward_button)
+        order_layout.addWidget(self.backward_button)
+        order_layout.addWidget(self.back_button)
+        layout.addLayout(order_layout)
+
+        self.front_button.clicked.connect(
+            lambda: self._change_order("front")
+        )
+        self.forward_button.clicked.connect(
+            lambda: self._change_order("forward")
+        )
+        self.backward_button.clicked.connect(
+            lambda: self._change_order("backward")
+        )
+        self.back_button.clicked.connect(
+            lambda: self._change_order("back")
+        )
+
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(250)
+        self.refresh_timer.timeout.connect(
+            self.refresh_if_needed
+        )
+        self.refresh_timer.start()
+
+    def _record_id(self, item):
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _record_signature_value(self, records):
+        return tuple(
+            (
+                str(record.get("id", "")),
+                str(record.get("type", "")),
+                int(record.get("page_index", 0)),
+                round(float(record.get("z", 20.0)), 4),
+                bool(record.get("visible", True)),
+                bool(record.get("locked", False)),
+                str(record.get("text", "")),
+                str(record.get("top", "")),
+                str(record.get("bottom", "")),
+            )
+            for record in records
+        )
+
+    def refresh_if_needed(self):
+        try:
+            layer_reader = getattr(
+                self.main_window.view,
+                "annotation_layer_records",
+                None,
+            )
+            if callable(layer_reader):
+                records = layer_reader()
+            else:
+                records = sorted(
+                    list(
+                        getattr(
+                            self.main_window.view,
+                            "_annotation_records",
+                            [],
+                        )
+                    ),
+                    key=lambda record: float(
+                        record.get("z", 20.0)
+                    ),
+                    reverse=True,
+                )
+        except RuntimeError:
+            return
+
+        signature = self._record_signature_value(records)
+        if signature == self._record_signature:
+            return
+
+        selected_id = None
+        current = self.list_widget.currentItem()
+        if current is not None:
+            selected_id = self._record_id(current)
+
+        self._loading = True
+        try:
+            self.list_widget.clear()
+
+            for record in records:
+                annotation_id = str(record.get("id", ""))
+                record_type = str(record.get("type", ""))
+                page = int(record.get("page_index", 0)) + 1
+
+                detail = ""
+                if record_type == "text":
+                    detail = str(record.get("text", "")).strip()
+                elif record_type in {"rectangle", "cloud"}:
+                    detail = str(record.get("text", "")).strip()
+                elif record_type == "date_stamp":
+                    detail = " / ".join(
+                        value
+                        for value in (
+                            str(record.get("top", "")).strip(),
+                            str(record.get("bottom", "")).strip(),
+                        )
+                        if value
+                    )
+
+                name = self.TYPE_NAMES.get(
+                    record_type,
+                    record_type,
+                )
+                label = f"P{page}  {name}"
+                if detail:
+                    compact = detail.replace("\n", " ")
+                    label += f" － {compact[:28]}"
+
+                item = QListWidgetItem(label)
+                item.setData(
+                    Qt.ItemDataRole.UserRole,
+                    annotation_id,
+                )
+                item.setData(
+                    Qt.ItemDataRole.UserRole + 2,
+                    int(record.get("page_index", 0)),
+                )
+                item.setFlags(
+                    item.flags()
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if bool(record.get("visible", True))
+                    else Qt.CheckState.Unchecked
+                )
+
+                locked = bool(record.get("locked", False))
+                item.setData(
+                    Qt.ItemDataRole.UserRole + 1,
+                    locked,
+                )
+                item.setToolTip(
+                    "🔒 ロック中\n"
+                    if locked
+                    else "表示チェック：表示／非表示\n"
+                    "右クリック相当のロック切替は下のボタン"
+                )
+
+                if locked:
+                    item.setText("🔒 " + item.text())
+
+                self.list_widget.addItem(item)
+
+                if annotation_id == selected_id:
+                    self.list_widget.setCurrentItem(item)
+
+            self.summary_label.setText(
+                f"注釈 {len(records)}件"
+            )
+            self._record_signature = signature
+        finally:
+            self._loading = False
+
+    def _on_item_clicked(self, item):
+        if self._loading:
+            return
+
+        annotation_id = self._record_id(item)
+        page_index = int(
+            item.data(
+                Qt.ItemDataRole.UserRole + 2
+            )
+            or 0
+        )
+        self.main_window.focus_annotation_from_list(
+            annotation_id,
+            page_index,
+        )
+
+
+    def _on_item_double_clicked(self, item):
+        self._on_item_clicked(item)
+
+
+    def _on_item_changed(self, item):
+        if self._loading:
+            return
+
+        annotation_id = self._record_id(item)
+        visible = (
+            item.checkState()
+            == Qt.CheckState.Checked
+        )
+        self.main_window.view.set_annotation_visible(
+            annotation_id,
+            visible,
+        )
+
+
+    def select_annotation_id(self, annotation_id):
+        annotation_id = str(annotation_id or "")
+        if not annotation_id:
+            return
+
+        self._loading = True
+        try:
+            for index in range(
+                self.list_widget.count()
+            ):
+                item = self.list_widget.item(index)
+                if (
+                    str(self._record_id(item))
+                    == annotation_id
+                ):
+                    self.list_widget.setCurrentItem(
+                        item
+                    )
+                    self.list_widget.scrollToItem(
+                        item,
+                        QAbstractItemView.ScrollHint.PositionAtCenter,
+                    )
+                    break
+        finally:
+            self._loading = False
+
+    def selected_annotation_id(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return None
+        return self._record_id(item)
+
+    def toggle_selected_lock(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+
+        annotation_id = self._record_id(item)
+        locked = bool(
+            item.data(Qt.ItemDataRole.UserRole + 1)
+        )
+        self.main_window.view.set_annotation_locked(
+            annotation_id,
+            not locked,
+        )
+        self._record_signature = None
+        self.refresh_if_needed()
+
+    def _change_order(self, operation):
+        annotation_id = self.selected_annotation_id()
+        if not annotation_id:
+            return
+
+        if self.main_window.view.change_annotation_z_by_id(
+            annotation_id,
+            operation,
+        ):
+            self._record_signature = None
+            self.refresh_if_needed()
+
+
+
+class PageThumbnailCard(QFrame):
+    def __init__(self, panel, page_id, display_number):
+        super().__init__(panel.content_widget)
+        self.panel = panel
+        self.page_id = int(page_id)
+        self.display_number = int(display_number)
+        self._press_position = None
+        self._drag_started = False
+        self._source_pixmap = QPixmap()
+
+        self.setObjectName("pageThumbnailCard")
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        self.card_layout = QVBoxLayout(self)
+        self.card_layout.setContentsMargins(7, 7, 7, 5)
+        self.card_layout.setSpacing(4)
+
+        self.image_label = QLabel(self)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+
+        self.number_label = QLabel(str(self.display_number), self)
+        self.number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.number_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+
+        self.card_layout.addWidget(
+            self.image_label,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        self.card_layout.addWidget(self.number_label)
+
+        self.set_selected(False)
+        self.update_display_size()
+
+    def set_thumbnail(self, pixmap):
+        if pixmap is None or pixmap.isNull():
+            return
+        self._source_pixmap = QPixmap(pixmap)
+        self.update_display_size()
+
+    def update_display_size(self):
+        max_width = int(self.panel.thumbnail_width)
+        max_height = int(self.panel.thumbnail_height)
+
+        if self._source_pixmap.isNull():
+            shown = QPixmap(max_width, max_height)
+            shown.fill(self.palette().color(self.backgroundRole()))
+        else:
+            shown = self._source_pixmap.scaled(
+                max_width,
+                max_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        display_width = max(shown.width(), 1)
+        display_height = max(shown.height(), 1)
+
+        self.image_label.setFixedSize(display_width, display_height)
+        self.image_label.setPixmap(shown)
+
+        card_width = display_width + 16
+        card_height = (
+            display_height
+            + self.number_label.sizeHint().height()
+            + 22
+        )
+        self.setFixedSize(card_width, card_height)
+
+    def set_selected(self, selected):
+        if selected:
+            self.setStyleSheet(
+                """
+                QFrame#pageThumbnailCard {
+                    border: 2px solid palette(highlight);
+                    border-radius: 6px;
+                    background: palette(alternate-base);
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#pageThumbnailCard {
+                    border: 1px solid transparent;
+                    border-radius: 6px;
+                    background: transparent;
+                }
+                QFrame#pageThumbnailCard:hover {
+                    border: 1px solid palette(mid);
+                    background: palette(button);
+                }
+                """
+            )
+
+
+    def contextMenuEvent(self, event):
+        self.panel.select_card(self)
+
+        menu = QMenu(self)
+
+        duplicate_action = menu.addAction(
+            "ページを複製"
+        )
+        delete_action = menu.addAction(
+            "ページを削除"
+        )
+
+        menu.addSeparator()
+
+        rotate_left_action = menu.addAction(
+            "左へ90°回転"
+        )
+        rotate_right_action = menu.addAction(
+            "右へ90°回転"
+        )
+
+        menu.addSeparator()
+
+        extract_action = menu.addAction(
+            "このページを抽出（1ページ保存）..."
+        )
+        split_action = menu.addAction(
+            "PDF全体を分割して保存..."
+        )
+
+        selected_action = menu.exec(
+            event.globalPos()
+        )
+
+        if selected_action is duplicate_action:
+            self.panel.main_window.duplicate_selected_page()
+        elif selected_action is delete_action:
+            self.panel.main_window.delete_selected_page()
+        elif selected_action is rotate_left_action:
+            self.panel.main_window.rotate_selected_page(
+                -90
+            )
+        elif selected_action is rotate_right_action:
+            self.panel.main_window.rotate_selected_page(
+                90
+            )
+        elif selected_action is extract_action:
+            self.panel.main_window.extract_selected_page()
+        elif selected_action is split_action:
+            self.panel.main_window.split_pdf_into_pages()
+
+        event.accept()
+
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_position = event.position().toPoint()
+            self._drag_started = False
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.panel.select_card(self)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._press_position is None
+            or not (event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            super().mouseMoveEvent(event)
+            return
+
+        distance = (
+            event.position().toPoint() - self._press_position
+        ).manhattanLength()
+
+        if not self._drag_started and distance >= 6:
+            self._drag_started = True
+            self.panel.begin_card_drag(self)
+
+        if self._drag_started:
+            global_position = self.mapToGlobal(event.position().toPoint())
+            self.panel.update_card_drag(self, global_position)
+
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            if self._drag_started:
+                global_position = self.mapToGlobal(event.position().toPoint())
+                self.panel.end_card_drag(self, global_position)
+
+            self._press_position = None
+            self._drag_started = False
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+
+class PageThumbnailPanel(QWidget):
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self._loading = False
+        self._thumbnail_queue = []
+        self._cards = []
+        self._selected_card = None
+        self._drag_card = None
+        self._drop_index = None
+
+        self.thumbnail_scale = 1.0
+        self.thumbnail_base_width = 170
+        self.thumbnail_base_height = 220
+        self.thumbnail_min_scale = 0.45
+        self.thumbnail_max_scale = 1.65
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(6, 6, 6, 6)
+        outer_layout.setSpacing(4)
+
+        self.title_label = QLabel("ページ", self)
+        self.title_label.setStyleSheet(
+            "font-weight: bold; padding: 4px 2px;"
+        )
+        outer_layout.addWidget(self.title_label)
+
+        self.zoom_hint_label = QLabel(
+            "Ctrl＋ホイール：サイズ",
+            self,
+        )
+        self.zoom_hint_label.setStyleSheet(
+            "color: palette(mid); padding: 0 2px 3px 2px;"
+        )
+        outer_layout.addWidget(self.zoom_hint_label)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(
+            QFrame.Shape.NoFrame
+        )
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.scroll_area.installEventFilter(self)
+        self.scroll_area.viewport().installEventFilter(self)
+
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(
+            self.content_widget
+        )
+        self.content_layout.setContentsMargins(
+            4,
+            4,
+            4,
+            4,
+        )
+        self.content_layout.setSpacing(5)
+        self.content_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop
+        )
+
+        self.drop_indicator = QFrame(
+            self.content_widget
+        )
+        self.drop_indicator.setFixedHeight(3)
+        self.drop_indicator.setStyleSheet(
+            "background: palette(highlight);"
+        )
+        self.drop_indicator.hide()
+
+        self.scroll_area.setWidget(
+            self.content_widget
+        )
+        outer_layout.addWidget(
+            self.scroll_area,
+            1,
+        )
+
+        self.add_pages_button = QPushButton(
+            "＋ ページ追加",
+            self,
+        )
+        self.add_pages_button.setMinimumHeight(34)
+        self.add_pages_button.setToolTip(
+            "別のPDFを選択し、その全ページを現在のPDFへ追加"
+        )
+        self.add_pages_button.clicked.connect(
+            self.main_window.add_pages_from_pdf
+        )
+        outer_layout.addWidget(
+            self.add_pages_button
+        )
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 2, 0, 0)
+        button_row.setSpacing(4)
+
+        self.duplicate_button = QPushButton(
+            "複製",
+            self,
+        )
+        self.delete_button = QPushButton(
+            "削除",
+            self,
+        )
+        self.duplicate_button.setToolTip(
+            "選択ページを複製"
+        )
+        self.delete_button.setToolTip(
+            "選択ページを削除"
+        )
+
+        for button in (
+            self.duplicate_button,
+            self.delete_button,
+        ):
+            button.setMinimumHeight(30)
+            button.setAutoDefault(False)
+            button_row.addWidget(button)
+
+        outer_layout.addLayout(button_row)
+
+        self.duplicate_button.clicked.connect(
+            self.main_window.duplicate_selected_page
+        )
+        self.delete_button.clicked.connect(
+            self.main_window.delete_selected_page
+        )
+        self.thumbnail_timer = QTimer(self)
+        self.thumbnail_timer.setSingleShot(True)
+        self.thumbnail_timer.timeout.connect(
+            self._render_next_thumbnail
+        )
+
+
+    @property
+    def thumbnail_width(self):
+        return max(
+            70,
+            int(round(self.thumbnail_base_width * self.thumbnail_scale)),
+        )
+
+    @property
+    def thumbnail_height(self):
+        return max(
+            90,
+            int(round(self.thumbnail_base_height * self.thumbnail_scale)),
+        )
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == event.Type.Wheel
+            and event.modifiers()
+            & Qt.KeyboardModifier.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            if delta == 0:
+                return True
+
+            step = 0.10 if delta > 0 else -0.10
+            self.set_thumbnail_scale(self.thumbnail_scale + step)
+            return True
+
+        return super().eventFilter(watched, event)
+
+    def set_thumbnail_scale(self, scale):
+        scale = max(
+            self.thumbnail_min_scale,
+            min(float(scale), self.thumbnail_max_scale),
+        )
+        scale = round(scale, 2)
+
+        if abs(scale - self.thumbnail_scale) < 0.001:
+            return
+
+        self.thumbnail_scale = scale
+
+        for card in self._cards:
+            card.update_display_size()
+
+        self.content_widget.adjustSize()
+        self._update_panel_width()
+
+        self.zoom_hint_label.setText(
+            "Ctrl＋ホイール：サイズ "
+            f"{round(self.thumbnail_scale * 100)}%"
+        )
+
+        self.thumbnail_timer.stop()
+        self._thumbnail_queue = list(range(len(self._cards)))
+        self.thumbnail_timer.start(0)
+
+    def _update_panel_width(self):
+        largest_width = self.thumbnail_width + 52
+
+        if self._cards:
+            largest_width = max(
+                card.width() + 36
+                for card in self._cards
+            )
+
+        desired_width = max(112, min(largest_width, 420))
+
+        dock = getattr(
+            self.main_window,
+            "page_thumbnail_dock",
+            None,
+        )
+        if dock is None:
+            return
+
+        dock.setMinimumWidth(
+            max(
+                108,
+                min(desired_width, 220),
+            )
+        )
+        dock.setMaximumWidth(460)
+        dock.resize(desired_width, dock.height())
+
+        self.main_window._position_page_thumbnail_toggle()
+
+    def _clear_cards(self):
+        self.thumbnail_timer.stop()
+        self._thumbnail_queue = []
+        self._cards = []
+        self._selected_card = None
+        self._drag_card = None
+        self._drop_index = None
+        self.drop_indicator.hide()
+
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def rebuild(self):
+        self._loading = True
+        self._clear_cards()
+
+        count = self.main_window.document.page_count
+        self.title_label.setText(
+            f"ページ（{count}）"
+        )
+
+        placeholder = QPixmap(
+            self.thumbnail_width,
+            self.thumbnail_height,
+        )
+        placeholder.fill(
+            self.palette().color(
+                self.backgroundRole()
+            )
+        )
+
+        for page_index in range(count):
+            card = PageThumbnailCard(
+                self,
+                page_index,
+                page_index + 1,
+            )
+            card.set_thumbnail(placeholder)
+            self._cards.append(card)
+            self.content_layout.addWidget(
+                card,
+                0,
+                Qt.AlignmentFlag.AlignHCenter,
+            )
+            self._thumbnail_queue.append(
+                page_index
+            )
+
+        if count:
+            selected_index = min(
+                max(
+                    int(
+                        self.main_window.current_page
+                    ),
+                    0,
+                ),
+                count - 1,
+            )
+            self.select_page(selected_index)
+
+        self.content_layout.addStretch(1)
+        self._loading = False
+        self._update_panel_width()
+        self.thumbnail_timer.start(0)
+
+    def select_card(self, card):
+        if card not in self._cards:
+            return
+
+        for candidate in self._cards:
+            candidate.set_selected(
+                candidate is card
+            )
+
+        self._selected_card = card
+
+        if not self._loading:
+            page_index = self._cards.index(card)
+            self.main_window.current_page = (
+                page_index
+            )
+            self.main_window.view.scroll_to_page(
+                page_index
+            )
+            self.main_window.update_toolbar()
+
+    def select_page(self, page_index):
+        page_index = int(page_index)
+        if not (
+            0 <= page_index < len(self._cards)
+        ):
+            return
+
+        previous = self._loading
+        self._loading = True
+        self.select_card(
+            self._cards[page_index]
+        )
+        self._loading = previous
+
+    def selected_page_index(self):
+        if self._selected_card not in self._cards:
+            return None
+        return self._cards.index(
+            self._selected_card
+        )
+
+    def begin_card_drag(self, card):
+        if card not in self._cards:
+            return
+
+        self._drag_card = card
+        self._drop_index = self._cards.index(card)
+        card.setWindowOpacity(0.55)
+        self.drop_indicator.show()
+
+    def _target_index_from_global(self, global_position):
+        if not self._cards:
+            return 0
+
+        content_position = (
+            self.content_widget.mapFromGlobal(
+                global_position
+            )
+        )
+
+        for index, card in enumerate(self._cards):
+            geometry = card.geometry()
+            if content_position.y() < geometry.center().y():
+                return index
+
+        return len(self._cards)
+
+    def _show_drop_indicator(self, target_index):
+        if not self._cards:
+            self.drop_indicator.hide()
+            return
+
+        target_index = max(
+            0,
+            min(target_index, len(self._cards)),
+        )
+
+        if target_index >= len(self._cards):
+            last_geometry = (
+                self._cards[-1].geometry()
+            )
+            y = last_geometry.bottom() + 3
+        else:
+            geometry = (
+                self._cards[target_index].geometry()
+            )
+            y = geometry.top() - 4
+
+        margin = 10
+        self.drop_indicator.setGeometry(
+            margin,
+            y,
+            max(
+                self.content_widget.width()
+                - margin * 2,
+                20,
+            ),
+            3,
+        )
+        self.drop_indicator.raise_()
+        self.drop_indicator.show()
+
+    def update_card_drag(
+        self,
+        card,
+        global_position,
+    ):
+        if card is not self._drag_card:
+            return
+
+        self._drop_index = (
+            self._target_index_from_global(
+                global_position
+            )
+        )
+        self._show_drop_indicator(
+            self._drop_index
+        )
+
+        viewport_position = (
+            self.scroll_area.viewport().mapFromGlobal(
+                global_position
+            )
+        )
+        scrollbar = (
+            self.scroll_area.verticalScrollBar()
+        )
+
+        edge = 35
+        if viewport_position.y() < edge:
+            scrollbar.setValue(
+                scrollbar.value() - 18
+            )
+        elif (
+            viewport_position.y()
+            > self.scroll_area.viewport().height()
+            - edge
+        ):
+            scrollbar.setValue(
+                scrollbar.value() + 18
+            )
+
+    def end_card_drag(
+        self,
+        card,
+        global_position,
+    ):
+        if card is not self._drag_card:
+            return
+
+        card.setWindowOpacity(1.0)
+        target_index = (
+            self._target_index_from_global(
+                global_position
+            )
+        )
+
+        source_index = self._cards.index(card)
+        if source_index < target_index:
+            target_index -= 1
+
+        target_index = max(
+            0,
+            min(
+                target_index,
+                len(self._cards) - 1,
+            ),
+        )
+
+        self.drop_indicator.hide()
+        self._drag_card = None
+        self._drop_index = None
+
+        if source_index == target_index:
+            return
+
+        order = [
+            candidate.page_id
+            for candidate in self._cards
+        ]
+
+        moved_page_id = order.pop(source_index)
+        order.insert(
+            target_index,
+            moved_page_id,
+        )
+
+        self.main_window.reorder_pages_from_thumbnails(
+            order
+        )
+
+    def _render_next_thumbnail(self):
+        if not self._thumbnail_queue:
+            return
+
+        page_index = self._thumbnail_queue.pop(0)
+
+        if (
+            0 <= page_index < len(self._cards)
+            and page_index
+            < self.main_window.document.page_count
+        ):
+            image = (
+                self.main_window.document.render_thumbnail(
+                    page_index,
+                    self.thumbnail_width,
+                    self.thumbnail_height,
+                )
+            )
+            if image is not None:
+                self._cards[
+                    page_index
+                ].set_thumbnail(
+                    QPixmap.fromImage(image)
+                )
+
+        if self._thumbnail_queue:
+            self.thumbnail_timer.start(1)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -832,7 +2016,14 @@ class MainWindow(QMainWindow):
         )
         self.current_page = 0
 
+        self._document_tabs = []
+        self._active_document_tab = -1
+        self._switching_document_tab = False
+
         self.view = PDFView()
+        self.view.setAcceptDrops(False)
+        self.view.viewport().setAcceptDrops(False)
+
         self._annotation_defaults_path = (
             self._get_annotation_defaults_path()
         )
@@ -859,21 +2050,74 @@ class MainWindow(QMainWindow):
         )
         self.setCentralWidget(self.view)
 
+        # During scrolling, completed render results are held back so tile
+        # replacement cannot interrupt scrollbar and viewport movement.
+        self._scroll_interacting = False
+        self._scroll_slider_held = False
+        self._deferred_render_result = None
+
+        self._initial_render_stage = None
+        self._initial_render_generation = None
+        self._initial_render_started_at = None
+        self._initial_open_started_at = None
+        self._initial_render_path = ""
+        self._initial_render_tab_index = -1
+
+        self.scroll_settle_timer = QTimer(self)
+        self.scroll_settle_timer.setSingleShot(True)
+        self.scroll_settle_timer.setInterval(220)
+        self.scroll_settle_timer.timeout.connect(
+            self._finish_scroll_interaction
+        )
+
+        vertical_bar = self.view.verticalScrollBar()
+        horizontal_bar = self.view.horizontalScrollBar()
+
+        vertical_bar.valueChanged.connect(
+            self._on_scroll_position_changed
+        )
+        horizontal_bar.valueChanged.connect(
+            self._on_scroll_position_changed
+        )
+        vertical_bar.sliderPressed.connect(
+            self._on_scroll_slider_pressed
+        )
+        horizontal_bar.sliderPressed.connect(
+            self._on_scroll_slider_pressed
+        )
+        vertical_bar.sliderReleased.connect(
+            self._on_scroll_slider_released
+        )
+        horizontal_bar.sliderReleased.connect(
+            self._on_scroll_slider_released
+        )
+
         # Wait until zooming settles before switching render resolution.
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
-        self.render_timer.setInterval(180)
+        self.render_timer.setInterval(280)
         self.render_timer.timeout.connect(self.rerender_for_current_zoom)
 
         # Scrolling receives a shorter debounce and renders only nearby tiles.
         self.visible_tile_timer = QTimer(self)
         self.visible_tile_timer.setSingleShot(True)
-        self.visible_tile_timer.setInterval(55)
+        self.visible_tile_timer.setInterval(140)
         self.visible_tile_timer.timeout.connect(self.render_visible_tiles)
 
         self.create_toolbar()
+        self.create_document_tab_bar()
+        self.create_page_thumbnail_panel()
         self.create_date_stamp_panel()
         self.create_annotation_properties_panel()
+        self.create_annotation_layer_panel()
+        QTimer.singleShot(
+            0,
+            self._position_annotation_layer_toggle,
+        )
+        QTimer.singleShot(
+            0,
+            self._position_page_thumbnail_toggle,
+        )
 
     def _get_annotation_defaults_path(self):
         config_dir = QStandardPaths.writableLocation(
@@ -1104,6 +2348,33 @@ class MainWindow(QMainWindow):
         self.annotation_group.addAction(self.ellipse_action)
         shape_menu.addAction(self.ellipse_action)
 
+        self.freehand_action = QAction("✍ 手書き", self)
+        self.freehand_action.setCheckable(True)
+        self.freehand_action.setToolTip("ページ上をドラッグして手書き線を追加")
+        self.freehand_action.triggered.connect(
+            lambda: self.set_annotation_mode("freehand")
+        )
+        self.annotation_group.addAction(self.freehand_action)
+        shape_menu.addAction(self.freehand_action)
+
+        self.highlighter_action = QAction("🖍 蛍光ペン", self)
+        self.highlighter_action.setCheckable(True)
+        self.highlighter_action.setToolTip("半透明の太い線を描画")
+        self.highlighter_action.triggered.connect(
+            lambda: self.set_annotation_mode("highlighter")
+        )
+        self.annotation_group.addAction(self.highlighter_action)
+        shape_menu.addAction(self.highlighter_action)
+
+        self.eraser_action = QAction("⌫ 消しゴム", self)
+        self.eraser_action.setCheckable(True)
+        self.eraser_action.setToolTip("なぞった部分だけ手書き線を消去")
+        self.eraser_action.triggered.connect(
+            lambda: self.set_annotation_mode("eraser")
+        )
+        self.annotation_group.addAction(self.eraser_action)
+        shape_menu.addAction(self.eraser_action)
+
         self.cloud_action = QAction("☁ クラウド", self)
         self.cloud_action.setCheckable(True)
         self.cloud_action.setToolTip(
@@ -1262,6 +2533,8 @@ class MainWindow(QMainWindow):
             self.statusBar().clearMessage()
             if hasattr(self, "annotation_properties_panel"):
                 self.annotation_properties_panel.clear()
+            if hasattr(self, "annotation_properties_toggle"):
+                self.annotation_properties_toggle.setChecked(False)
             return
 
         if count == 1:
@@ -1273,6 +2546,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{count}個の注釈を選択中"
         )
+
+        if hasattr(self, "multi_annotation_properties_panel"):
+            self.multi_annotation_properties_panel.set_selection_count(
+                count
+            )
+            if self.annotation_properties_dock.isVisible():
+                self.annotation_properties_stack.setCurrentWidget(
+                    self.multi_annotation_properties_panel
+                )
+
 
     def on_undo_available_changed(self, available):
         if hasattr(self, "undo_action"):
@@ -1287,6 +2570,9 @@ class MainWindow(QMainWindow):
             self.arrow_action,
             self.rectangle_action,
             self.ellipse_action,
+            self.freehand_action,
+            self.highlighter_action,
+            self.eraser_action,
             self.cloud_action,
         }:
             self.shape_tool_button.setDefaultAction(action)
@@ -1301,37 +2587,1015 @@ class MainWindow(QMainWindow):
             self.mark_tool_button.setDefaultAction(action)
 
 
-    def create_annotation_properties_panel(self):
-        self.annotation_properties_dock = QDockWidget(
-            "プロパティ",
+
+    def create_annotation_layer_panel(self):
+        self.annotation_layer_dock = QDockWidget(
+            "注釈・プロパティ",
             self,
         )
-        self.annotation_properties_dock.setObjectName(
-            "annotationPropertiesDock"
+        self.annotation_layer_dock.setObjectName(
+            "annotationLayerDock"
         )
-        self.annotation_properties_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+
+        self.annotation_layer_panel = (
+            AnnotationLayerPanel(self)
         )
+
+        self.annotation_side_splitter = QSplitter(
+            Qt.Orientation.Vertical,
+            self,
+        )
+        self.annotation_side_splitter.setChildrenCollapsible(
+            False
+        )
+        self.annotation_side_splitter.addWidget(
+            self.annotation_layer_panel
+        )
+        self.annotation_side_splitter.addWidget(
+            self.annotation_properties_stack
+        )
+        self.annotation_side_splitter.setStretchFactor(
+            0,
+            3,
+        )
+        self.annotation_side_splitter.setStretchFactor(
+            1,
+            2,
+        )
+        self.annotation_side_splitter.setSizes(
+            [420, 300]
+        )
+
+        self.annotation_layer_dock.setWidget(
+            self.annotation_side_splitter
+        )
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.annotation_layer_dock,
+        )
+        self.annotation_layer_dock.setMinimumWidth(310)
+        self.annotation_layer_dock.setMaximumWidth(620)
+        self.annotation_layer_dock.resize(
+            380,
+            self.height(),
+        )
+        self.annotation_layer_dock.hide()
+
+        # Compatibility alias for existing property-panel code.
+        self.annotation_properties_dock = (
+            self.annotation_layer_dock
+        )
+
+        self.annotation_layer_toggle = QToolButton(self)
+        self.annotation_layer_toggle.setText("◀")
+        self.annotation_layer_toggle.setToolTip(
+            "注釈・プロパティを表示"
+        )
+        self.annotation_layer_toggle.setCheckable(True)
+        self.annotation_layer_toggle.setFixedWidth(24)
+        self.annotation_layer_toggle.setAutoRaise(True)
+        self.annotation_layer_toggle.toggled.connect(
+            self.toggle_annotation_layer_panel
+        )
+
+        self.annotation_layer_dock.visibilityChanged.connect(
+            self._on_annotation_layer_visibility_changed
+        )
+
+        lock_action = QAction(
+            "注釈のロック切替",
+            self,
+        )
+        lock_action.setShortcut("Ctrl+L")
+        lock_action.triggered.connect(
+            self.annotation_layer_panel.toggle_selected_lock
+        )
+        self.addAction(lock_action)
+
+        lock_button = QPushButton(
+            "🔒 ロック／解除",
+            self.annotation_layer_panel,
+        )
+        lock_button.clicked.connect(
+            self.annotation_layer_panel.toggle_selected_lock
+        )
+        self.annotation_layer_panel.layout().insertWidget(
+            2,
+            lock_button,
+        )
+
+
+    def toggle_annotation_layer_panel(self, visible):
+        visible = bool(visible)
+
+        if visible:
+            self.annotation_layer_dock.show()
+            self.annotation_layer_dock.raise_()
+            self.annotation_layer_toggle.setText("▶")
+            self.annotation_layer_toggle.setToolTip(
+                "注釈・プロパティを隠す"
+            )
+            self.annotation_layer_panel.refresh_if_needed()
+        else:
+            self.annotation_layer_dock.hide()
+            self.annotation_layer_toggle.setText("◀")
+            self.annotation_layer_toggle.setToolTip(
+                "注釈・プロパティを表示"
+            )
+
+        self._position_annotation_layer_toggle()
+
+    def _on_annotation_layer_visibility_changed(self, visible):
+        self.annotation_layer_toggle.blockSignals(True)
+        self.annotation_layer_toggle.setChecked(bool(visible))
+        self.annotation_layer_toggle.setText(
+            "▶" if visible else "◀"
+        )
+        self.annotation_layer_toggle.setToolTip(
+            "注釈・プロパティを隠す"
+            if visible
+            else "注釈・プロパティを表示"
+        )
+        self.annotation_layer_toggle.blockSignals(False)
+        self._position_annotation_layer_toggle()
+
+    def _position_annotation_layer_toggle(self):
+        button = getattr(
+            self,
+            "annotation_layer_toggle",
+            None,
+        )
+        if button is None:
+            return
+
+        margin = 2
+        x = self.width() - button.width() - margin
+        y = max(
+            self.menuBar().height() + 8,
+            int(
+                (
+                    self.height()
+                    - button.height()
+                )
+                / 2
+            ),
+        )
+
+        if self.annotation_layer_dock.isVisible():
+            dock_width = self.annotation_layer_dock.width()
+            x = max(
+                0,
+                self.width()
+                - dock_width
+                - button.width()
+                - margin,
+            )
+
+        button.move(x, y)
+        button.raise_()
+        button.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+        if hasattr(self, "annotation_layer_toggle"):
+            self._position_annotation_layer_toggle()
+
+        if hasattr(self, "annotation_properties_toggle"):
+            self._position_annotation_properties_toggle()
+
+        if hasattr(self, "page_thumbnail_toggle"):
+            self._position_page_thumbnail_toggle()
+
+    def create_annotation_properties_panel(self):
+        self.annotation_properties_stack = QStackedWidget(
+            self
+        )
+
         self.annotation_properties_panel = (
             AnnotationPropertiesPanel(self)
         )
-        self.annotation_properties_dock.setWidget(
-            self.annotation_properties_panel
-        )
-        self.addDockWidget(
-            Qt.DockWidgetArea.LeftDockWidgetArea,
-            self.annotation_properties_dock,
+        self.multi_annotation_properties_panel = (
+            MultiAnnotationPropertiesPanel(self)
         )
 
-        self.annotation_properties_dock.setMinimumWidth(250)
-        self.annotation_properties_dock.setMaximumWidth(520)
-        self.annotation_properties_dock.resize(
-            300,
-            self.height(),
+        self.annotation_properties_stack.addWidget(
+            self.annotation_properties_panel
         )
-        self.annotation_properties_dock.hide()
+        self.annotation_properties_stack.addWidget(
+            self.multi_annotation_properties_panel
+        )
+
+        self.annotation_properties_stack.setMinimumHeight(
+            220
+        )
+
+
+    def toggle_annotation_properties_panel(self, visible):
+        self.annotation_layer_toggle.setChecked(
+            bool(visible)
+        )
+
+
+    def _on_annotation_properties_visibility_changed(
+        self,
+        visible,
+    ):
+        return
+
+
+    def _position_annotation_properties_toggle(self):
+        return
+
+
+    def create_page_thumbnail_panel(self):
+        self.page_thumbnail_dock = QDockWidget("ページ一覧", self)
+        self.page_thumbnail_dock.setObjectName("pageThumbnailDock")
+        self.page_thumbnail_panel = PageThumbnailPanel(self)
+        self.page_thumbnail_dock.setWidget(self.page_thumbnail_panel)
+        self.addDockWidget(
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            self.page_thumbnail_dock,
+        )
+        self.page_thumbnail_dock.setMinimumWidth(108)
+        self.page_thumbnail_dock.setMaximumWidth(460)
+        self.page_thumbnail_dock.resize(236, self.height())
+        self.page_thumbnail_dock.hide()
+
+        self.page_thumbnail_toggle = QToolButton(self)
+        self.page_thumbnail_toggle.setText("▶")
+        self.page_thumbnail_toggle.setToolTip("ページ一覧を表示")
+        self.page_thumbnail_toggle.setCheckable(True)
+        self.page_thumbnail_toggle.setFixedWidth(24)
+        self.page_thumbnail_toggle.setAutoRaise(True)
+        self.page_thumbnail_toggle.toggled.connect(
+            self.toggle_page_thumbnail_panel
+        )
+        self.page_thumbnail_dock.visibilityChanged.connect(
+            self._on_page_thumbnail_visibility_changed
+        )
+
+    def toggle_page_thumbnail_panel(self, visible):
+        visible = bool(visible)
+        if visible:
+            self.page_thumbnail_dock.show()
+            self.page_thumbnail_dock.raise_()
+            self.page_thumbnail_toggle.setText("◀")
+            self.page_thumbnail_toggle.setToolTip("ページ一覧を隠す")
+            self.page_thumbnail_panel.rebuild()
+        else:
+            self.page_thumbnail_dock.hide()
+            self.page_thumbnail_toggle.setText("▶")
+            self.page_thumbnail_toggle.setToolTip("ページ一覧を表示")
+        self._position_page_thumbnail_toggle()
+
+    def _on_page_thumbnail_visibility_changed(self, visible):
+        self.page_thumbnail_toggle.blockSignals(True)
+        self.page_thumbnail_toggle.setChecked(bool(visible))
+        self.page_thumbnail_toggle.setText("◀" if visible else "▶")
+        self.page_thumbnail_toggle.setToolTip(
+            "ページ一覧を隠す" if visible else "ページ一覧を表示"
+        )
+        self.page_thumbnail_toggle.blockSignals(False)
+        self._position_page_thumbnail_toggle()
+
+    def _position_page_thumbnail_toggle(self):
+        button = getattr(self, "page_thumbnail_toggle", None)
+        if button is None:
+            return
+        margin = 2
+        x = margin
+        y = max(self.menuBar().height() + 45, int(self.height() * 0.32))
+        if self.page_thumbnail_dock.isVisible():
+            x = self.page_thumbnail_dock.width() + margin
+        button.move(x, y)
+        button.raise_()
+        button.show()
+
+    def _refresh_after_page_structure_change(self, target_page=0):
+        self.render_pipeline.invalidate()
+        self.render_manager.clear()
+        self.render_manager.prepare_document(self.document)
+
+        self.current_page = min(
+            max(int(target_page), 0),
+            max(self.document.page_count - 1, 0),
+        )
+
+        self.show_document(schedule_render=False)
+        self.view._restore_annotation_items()
+        self.view.scroll_to_page(self.current_page)
+        self.view.fit_to_width()
+
+        if self.page_thumbnail_dock.isVisible():
+            self.page_thumbnail_panel.rebuild()
+
+        self.schedule_visible_tile_render()
+        self.update_toolbar()
+
+    def _remap_annotations_for_page_order(self, order):
+        old_to_new = {
+            int(old_index): int(new_index)
+            for new_index, old_index in enumerate(order)
+        }
+        for record in self.view._annotation_records:
+            old_page = int(record.get("page_index", 0))
+            if old_page in old_to_new:
+                record["page_index"] = old_to_new[old_page]
+
+    def reorder_pages_from_thumbnails(self, order):
+        if not self.document.has_document():
+            return
+
+        order = [int(value) for value in order]
+        if order == list(range(self.document.page_count)):
+            return
+
+        selected_row = (
+            self.page_thumbnail_panel.selected_page_index()
+        )
+        if selected_row is None:
+            selected_row = 0
+
+        self.view._sync_annotation_records()
+        self._remap_annotations_for_page_order(order)
+        self.document.reorder_pages(order)
+        self._refresh_after_page_structure_change(
+            min(max(selected_row, 0), self.document.page_count - 1)
+        )
+
+
+    def add_pages_from_pdf(self):
+        if not self.document.has_document():
+            QMessageBox.information(
+                self,
+                "ページを追加できません",
+                "先に追加先のPDFを開いてください。",
+            )
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "追加するPDFを選択",
+            "",
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+
+        try:
+            source_page_count = (
+                self.document.get_external_page_count(path)
+            )
+        except PDFOpenError as error:
+            QMessageBox.critical(
+                self,
+                "PDFを開けません",
+                str(error),
+            )
+            return
+
+        if source_page_count <= 0:
+            QMessageBox.information(
+                self,
+                "ページを追加できません",
+                "選択したPDFにページがありません。",
+            )
+            return
+
+        selected_index = (
+            self.page_thumbnail_panel.selected_page_index()
+        )
+        if selected_index is None:
+            selected_index = (
+                self.document.page_count - 1
+            )
+
+        insert_after = QMessageBox.question(
+            self,
+            "ページ追加位置",
+            (
+                f"選択中の{selected_index + 1}ページ目の後ろへ、"
+                f"{source_page_count}ページを追加しますか？\n\n"
+                "［いいえ］を選ぶとPDFの末尾へ追加します。"
+            ),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+
+        if insert_after == QMessageBox.StandardButton.Cancel:
+            return
+
+        if insert_after == QMessageBox.StandardButton.Yes:
+            insertion_index = selected_index + 1
+        else:
+            insertion_index = self.document.page_count
+
+        self.view._sync_annotation_records()
+
+        try:
+            inserted_count = self.document.insert_pdf_pages(
+                path,
+                insertion_index,
+            )
+        except PDFOpenError as error:
+            QMessageBox.critical(
+                self,
+                "ページを追加できません",
+                str(error),
+            )
+            return
+
+        if inserted_count <= 0:
+            return
+
+        for record in self.view._annotation_records:
+            page_index = int(
+                record.get("page_index", 0)
+            )
+            if page_index >= insertion_index:
+                record["page_index"] = (
+                    page_index + inserted_count
+                )
+
+        self._refresh_after_page_structure_change(
+            insertion_index
+        )
+
+        QMessageBox.information(
+            self,
+            "ページ追加",
+            f"{inserted_count}ページを追加しました。",
+        )
+
+
+    def _restore_thumbnail_after_page_edit(
+        self,
+        scroll_value,
+        page_index,
+    ):
+        if not hasattr(
+            self,
+            "page_thumbnail_panel",
+        ):
+            return
+
+        panel = self.page_thumbnail_panel
+        scrollbar = (
+            panel.scroll_area.verticalScrollBar()
+        )
+        scrollbar.setValue(
+            min(
+                max(int(scroll_value), 0),
+                scrollbar.maximum(),
+            )
+        )
+        panel.select_page(page_index)
+
+    def extract_selected_page(self):
+        if not self.document.has_document():
+            return
+
+        page_index = (
+            self.page_thumbnail_panel.selected_page_index()
+        )
+        if page_index is None:
+            return
+
+        source_path = Path(
+            self.document.path or "document.pdf"
+        )
+        default_name = (
+            f"{source_path.stem}_"
+            f"{page_index + 1:03d}.pdf"
+        )
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "このページを抽出",
+            str(source_path.with_name(default_name)),
+            "PDF (*.pdf)",
+        )
+        if not output_path:
+            return
+
+        if not output_path.lower().endswith(".pdf"):
+            output_path += ".pdf"
+
+        try:
+            self._commit_pending_annotations()
+            self.document.export_page(
+                page_index,
+                output_path,
+            )
+        except PDFSaveError as error:
+            QMessageBox.critical(
+                self,
+                "ページを保存できません",
+                str(error),
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "ページ抽出",
+            (
+                f"{page_index + 1}ページ目を"
+                "1ページPDFとして保存しました。"
+            ),
+        )
+
+    def split_pdf_into_pages(self):
+        if not self.document.has_document():
+            return
+
+        output_directory = (
+            QFileDialog.getExistingDirectory(
+                self,
+                "分割PDFの保存先を選択",
+                str(
+                    Path(
+                        self.document.path or "."
+                    ).parent
+                ),
+            )
+        )
+        if not output_directory:
+            return
+
+        source_path = Path(
+            self.document.path or "document.pdf"
+        )
+
+        try:
+            self._commit_pending_annotations()
+            saved_paths = self.document.split_to_pages(
+                output_directory,
+                source_path.stem,
+            )
+        except PDFSaveError as error:
+            QMessageBox.critical(
+                self,
+                "PDFを分割できません",
+                str(error),
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "PDF分割",
+            (
+                f"{len(saved_paths)}ページを"
+                "個別のPDFとして保存しました。"
+            ),
+        )
+
+    def duplicate_selected_page(self):
+        index = self.page_thumbnail_panel.selected_page_index()
+        if index is None:
+            return
+
+        self.view._sync_annotation_records()
+        self.document.duplicate_page(index)
+
+        new_records = []
+        for record in self.view._annotation_records:
+            page_index = int(record.get("page_index", 0))
+            if page_index > index:
+                record["page_index"] = page_index + 1
+            new_records.append(record)
+
+            if page_index == index:
+                duplicate = deepcopy(record)
+                duplicate["id"] = str(uuid.uuid4())
+                duplicate["page_index"] = index + 1
+                new_records.append(duplicate)
+
+        self.view._annotation_records = new_records
+        self._refresh_after_page_structure_change(index + 1)
+
+    def delete_selected_page(self):
+        index = self.page_thumbnail_panel.selected_page_index()
+        if index is None:
+            return
+
+        if self.document.page_count <= 1:
+            QMessageBox.information(
+                self,
+                "ページを削除できません",
+                "最後の1ページは削除できません。",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "ページ削除",
+            f"{index + 1}ページ目を削除しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.view._sync_annotation_records()
+        self.document.delete_page(index)
+
+        records = []
+        for record in self.view._annotation_records:
+            page_index = int(record.get("page_index", 0))
+            if page_index == index:
+                continue
+            if page_index > index:
+                record["page_index"] = page_index - 1
+            records.append(record)
+
+        self.view._annotation_records = records
+        self._refresh_after_page_structure_change(
+            min(index, self.document.page_count - 1)
+        )
+
+    def rotate_selected_page(self, degrees):
+        index = (
+            self.page_thumbnail_panel.selected_page_index()
+        )
+        if index is None:
+            return
+
+        thumbnail_scroll = (
+            self.page_thumbnail_panel.scroll_area
+            .verticalScrollBar()
+            .value()
+        )
+
+        self.document.rotate_page(
+            index,
+            int(degrees),
+        )
+        self._refresh_after_page_structure_change(
+            index
+        )
+
+        QTimer.singleShot(
+            0,
+            lambda value=thumbnail_scroll, index=index: (
+                self._restore_thumbnail_after_page_edit(
+                    value,
+                    index,
+                )
+            ),
+        )
+
+
+    def create_document_tab_bar(self):
+        self.document_tab_toolbar = QToolBar(
+            "ドキュメントタブ",
+            self,
+        )
+        self.document_tab_toolbar.setObjectName(
+            "documentTabToolbar"
+        )
+        self.document_tab_toolbar.setMovable(False)
+        self.document_tab_toolbar.setFloatable(False)
+
+        # Keep document tabs on a dedicated second row instead of squeezing
+        # them into the main command toolbar.
+        self.addToolBarBreak(
+            Qt.ToolBarArea.TopToolBarArea
+        )
+        self.addToolBar(
+            Qt.ToolBarArea.TopToolBarArea,
+            self.document_tab_toolbar,
+        )
+
+        self.document_tab_bar = QTabBar(self)
+        self.document_tab_bar.setMovable(True)
+        self.document_tab_bar.setTabsClosable(True)
+        self.document_tab_bar.setExpanding(False)
+        self.document_tab_bar.setDocumentMode(True)
+        self.document_tab_bar.setElideMode(
+            Qt.TextElideMode.ElideMiddle
+        )
+        self.document_tab_bar.setUsesScrollButtons(True)
+        self.document_tab_bar.setMinimumHeight(32)
+        self.document_tab_bar.setStyleSheet(
+            """
+            QTabBar {
+                background: palette(window);
+            }
+
+            QTabBar::tab {
+                min-width: 140px;
+                max-width: 260px;
+                min-height: 30px;
+                padding: 4px 12px;
+                margin-right: 3px;
+                border: 1px solid palette(mid);
+                border-bottom: 2px solid palette(mid);
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                background: palette(button);
+                color: palette(button-text);
+            }
+
+            QTabBar::tab:selected {
+                background: palette(highlight);
+                color: palette(highlighted-text);
+                border-color: palette(highlight);
+                border-bottom: 3px solid palette(highlight);
+                font-weight: bold;
+            }
+
+            QTabBar::tab:hover:!selected {
+                background: palette(light);
+                border-color: palette(highlight);
+            }
+
+            QTabBar::close-button {
+                subcontrol-position: right;
+                margin-left: 6px;
+            }
+            """
+        )
+        self.document_tab_bar.currentChanged.connect(
+            self.on_document_tab_changed
+        )
+        self.document_tab_bar.tabCloseRequested.connect(
+            self.close_document_tab
+        )
+
+        self.document_tab_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.document_tab_toolbar.addWidget(
+            self.document_tab_bar
+        )
+        self.document_tab_toolbar.hide()
+
+    def _capture_active_document_tab(self):
+        index = self._active_document_tab
+        if (
+            index < 0
+            or index >= len(self._document_tabs)
+            or not self.document.has_document()
+        ):
+            return
+
+        session = self._document_tabs[index]
+
+        try:
+            self.view._sync_annotation_records()
+            session["annotations"] = deepcopy(
+                self.view._annotation_records
+            )
+        except RuntimeError:
+            pass
+
+        session["page"] = int(self.current_page)
+        session["zoom"] = float(
+            getattr(self.view, "zoom_factor", 1.0)
+        )
+        session["h_scroll"] = int(
+            self.view.horizontalScrollBar().value()
+        )
+        session["v_scroll"] = int(
+            self.view.verticalScrollBar().value()
+        )
+        session["path"] = str(self.document.path)
+
+    def _find_document_tab(self, path):
+        normalized = str(
+            Path(path).resolve()
+        ).lower()
+
+        for index, session in enumerate(
+            self._document_tabs
+        ):
+            existing = str(
+                Path(session["path"]).resolve()
+            ).lower()
+            if existing == normalized:
+                return index
+
+        return -1
+
+    def _new_document_session(self, path):
+        return {
+            "path": str(Path(path)),
+            "annotations": [],
+            "page": 0,
+            "zoom": None,
+            "h_scroll": 0,
+            "v_scroll": 0,
+        }
+
+    def _load_document_session(self, index):
+        if index < 0 or index >= len(self._document_tabs):
+            return False
+
+        session = self._document_tabs[index]
+        path = session["path"]
+        total_started = perf_counter()
+        self._initial_open_started_at = total_started
+
+        try:
+            open_started = perf_counter()
+            self.document.open(path)
+            self._log_initial_timing(
+                "PDF open",
+                (
+                    perf_counter()
+                    - open_started
+                )
+                * 1000.0,
+            )
+
+            self.selected_date_stamp_item = None
+            self.view.clear_pending_annotations()
+            self.render_pipeline.invalidate()
+            self.render_manager.clear()
+
+            prepare_started = perf_counter()
+            self.render_manager.prepare_document(
+                self.document
+            )
+            self._log_initial_timing(
+                "DisplayList preparation",
+                (
+                    perf_counter()
+                    - prepare_started
+                )
+                * 1000.0,
+            )
+
+            self.current_page = int(
+                session.get("page", 0)
+            )
+
+            layout_started = perf_counter()
+            self.show_document(
+                schedule_render=False
+            )
+            self._log_initial_timing(
+                "Layout",
+                (
+                    perf_counter()
+                    - layout_started
+                )
+                * 1000.0,
+            )
+
+            self.view._annotation_records = deepcopy(
+                session.get("annotations", [])
+            )
+            self.view._restore_annotation_items()
+
+            zoom = session.get("zoom")
+            if zoom is None:
+                self.view.fit_to_width()
+            else:
+                self.view.set_zoom(
+                    float(zoom)
+                )
+
+            self.view.scroll_to_page(
+                self.current_page
+            )
+
+            QTimer.singleShot(
+                0,
+                lambda: self._restore_document_scroll(
+                    index
+                ),
+            )
+
+            self.setWindowTitle(
+                f"{Path(path).name} - PDFInspector"
+            )
+
+            self._log_initial_timing(
+                "Open to UI ready",
+                (
+                    perf_counter()
+                    - total_started
+                )
+                * 1000.0,
+            )
+
+            if hasattr(self, "page_thumbnail_dock") and self.page_thumbnail_dock.isVisible():
+                self.page_thumbnail_panel.rebuild()
+
+            self._begin_initial_render(
+                index,
+                path,
+            )
+            return True
+
+        except PDFOpenError as error:
+            self._initial_render_stage = None
+            QMessageBox.critical(
+                self,
+                "PDFを開けません",
+                str(error),
+            )
+            return False
+
+
+    def _restore_document_scroll(self, index):
+        if (
+            index != self._active_document_tab
+            or index < 0
+            or index >= len(self._document_tabs)
+        ):
+            return
+
+        session = self._document_tabs[index]
+        self.view.horizontalScrollBar().setValue(
+            int(session.get("h_scroll", 0))
+        )
+        self.view.verticalScrollBar().setValue(
+            int(session.get("v_scroll", 0))
+        )
+
+    def on_document_tab_changed(self, index):
+        if self._switching_document_tab:
+            return
+
+        index = int(index)
+        if index < 0 or index >= len(self._document_tabs):
+            return
+
+        if index == self._active_document_tab:
+            return
+
+        self._capture_active_document_tab()
+
+        previous = self._active_document_tab
+        self._switching_document_tab = True
+        try:
+            if self._load_document_session(index):
+                self._active_document_tab = index
+            elif previous >= 0:
+                self.document_tab_bar.setCurrentIndex(
+                    previous
+                )
+        finally:
+            self._switching_document_tab = False
+
+    def close_document_tab(self, index):
+        index = int(index)
+        if index < 0 or index >= len(self._document_tabs):
+            return
+
+        if index == self._active_document_tab:
+            self._capture_active_document_tab()
+
+        self._switching_document_tab = True
+        try:
+            self.document_tab_bar.removeTab(index)
+            self._document_tabs.pop(index)
+
+            if not self._document_tabs:
+                self._active_document_tab = -1
+                self.document.close()
+                self.view.clear_pending_annotations()
+                self.render_pipeline.invalidate()
+                self.render_manager.clear()
+                self.setWindowTitle("PDFInspector")
+                self.document_tab_toolbar.hide()
+                self.update_toolbar()
+                return
+
+            next_index = min(
+                index,
+                len(self._document_tabs) - 1,
+            )
+            self._active_document_tab = -1
+            self.document_tab_bar.setCurrentIndex(
+                next_index
+            )
+        finally:
+            self._switching_document_tab = False
+
+        self.on_document_tab_changed(
+            self.document_tab_bar.currentIndex()
+        )
+
+    def close_all_document_tabs(self):
+        self._capture_active_document_tab()
+        self._document_tabs.clear()
+        self._active_document_tab = -1
+
+        self._switching_document_tab = True
+        try:
+            while self.document_tab_bar.count():
+                self.document_tab_bar.removeTab(0)
+        finally:
+            self._switching_document_tab = False
+
+        self.document_tab_toolbar.hide()
 
     def create_date_stamp_panel(self):
         self.selected_date_stamp_item = None
@@ -1548,7 +3812,38 @@ class MainWindow(QMainWindow):
             self.view.set_date_stamp_preview_settings(
                 self.current_date_stamp_settings()
             )
+
         self.view.set_annotation_mode(mode)
+
+        action_map = {
+            "hand": self.hand_action,
+            "check": self.check_action,
+            "comment": self.comment_action,
+            "date_stamp": self.date_stamp_action,
+            "arrow": self.arrow_action,
+            "rectangle": self.rectangle_action,
+            "ellipse": self.ellipse_action,
+            "freehand": self.freehand_action,
+            "highlighter": self.highlighter_action,
+            "eraser": self.eraser_action,
+            "cloud": self.cloud_action,
+        }
+        action = action_map.get(mode)
+        if action is not None:
+            action.setChecked(True)
+
+        if mode in {"check", "comment", "date_stamp"}:
+            self.mark_tool_button.setDefaultAction(action)
+        elif mode in {
+            "arrow",
+            "rectangle",
+            "ellipse",
+            "freehand",
+            "highlighter",
+            "eraser",
+            "cloud",
+        }:
+            self.shape_tool_button.setDefaultAction(action)
 
 
     def on_annotation_clicked(self, page_index, page_point):
@@ -1619,14 +3914,102 @@ class MainWindow(QMainWindow):
         )
 
 
+
+    def focus_annotation_from_list(
+        self,
+        annotation_id,
+        page_index,
+    ):
+        if not self.document.has_document():
+            return
+
+        page_index = min(
+            max(int(page_index), 0),
+            max(self.document.page_count - 1, 0),
+        )
+
+        self.current_page = page_index
+        self.view.scroll_to_page(page_index)
+        self.update_toolbar()
+
+        if hasattr(self, "page_thumbnail_panel"):
+            self.page_thumbnail_panel.select_page(
+                page_index
+            )
+
+        # In single-page mode scroll_to_page rebuilds the scene. Defer the
+        # selection until the new page and its annotation items exist.
+        QTimer.singleShot(
+            0,
+            lambda annotation_id=str(annotation_id): (
+                self._complete_annotation_list_focus(
+                    annotation_id
+                )
+            ),
+        )
+
+    def _complete_annotation_list_focus(
+        self,
+        annotation_id,
+    ):
+        if not self.document.has_document():
+            return
+
+        focused = self.view.focus_annotation_by_id(
+            annotation_id
+        )
+        if not focused:
+            # A render/layout event can occasionally still be pending.
+            QTimer.singleShot(
+                30,
+                lambda annotation_id=str(annotation_id): (
+                    self.view.focus_annotation_by_id(
+                        annotation_id
+                    )
+                ),
+            )
+
+        self.annotation_layer_toggle.setChecked(True)
+        self.annotation_layer_dock.raise_()
+
     def on_annotation_selected(self, item):
+        if (
+            item is not None
+            and hasattr(self, "annotation_layer_panel")
+        ):
+            self.annotation_layer_panel.select_annotation_id(
+                getattr(item, "record", {}).get("id")
+            )
+
+        selected_count = 0
+        try:
+            selected_count = len(
+                self.view._selected_annotation_items()
+            )
+        except RuntimeError:
+            selected_count = 0
+
         if hasattr(self, "annotation_properties_panel"):
             if item is None:
                 self.annotation_properties_panel.clear()
-            else:
+            elif selected_count <= 1:
                 self.annotation_properties_panel.set_item(item)
-                self.annotation_properties_dock.show()
-                self.annotation_properties_dock.raise_()
+                self.annotation_properties_stack.setCurrentWidget(
+                    self.annotation_properties_panel
+                )
+                self.annotation_layer_toggle.setChecked(True)
+                self.annotation_layer_dock.raise_()
+            else:
+                # annotation_selected identifies the active object inside a
+                # multi-selection. Do not let it replace the multi-edit panel.
+                self.multi_annotation_properties_panel.set_selection_count(
+                    selected_count
+                )
+                self.annotation_properties_stack.setCurrentWidget(
+                    self.multi_annotation_properties_panel
+                )
+                self.annotation_layer_toggle.setChecked(True)
+                self.annotation_layer_dock.raise_()
 
         if getattr(item, "record", {}).get("type") != "date_stamp":
             self.selected_date_stamp_item = None
@@ -1670,98 +4053,29 @@ class MainWindow(QMainWindow):
         if not record:
             return
 
-        record_type = record.get("type")
+        selected_count = 0
+        try:
+            selected_count = len(
+                self.view._selected_annotation_items()
+            )
+        except RuntimeError:
+            selected_count = 0
 
-        if record_type == "text":
-            text, accepted = QInputDialog.getMultiLineText(
-                self,
-                "コメント編集",
-                "コメント内容:",
-                record.get("text", ""),
+        if selected_count > 1:
+            self.multi_annotation_properties_panel.set_selection_count(
+                selected_count
             )
-            if not accepted:
-                return
-            text = text.strip()
-            if not text:
-                before = self.view._history_snapshot()
-                self.view._remove_record(record)
-                self.view._commit_history_change(before)
-                return
-            before = self.view._history_snapshot()
-            record["text"] = text
-            item.setPlainText(text)
-            self.view._commit_history_change(before)
-            return
+            self.annotation_properties_stack.setCurrentWidget(
+                self.multi_annotation_properties_panel
+            )
+        else:
+            self.annotation_properties_panel.set_item(item)
+            self.annotation_properties_stack.setCurrentWidget(
+                self.annotation_properties_panel
+            )
 
-        if record_type == "date_stamp":
-            self.on_annotation_selected(item)
-            return
-
-        if record_type == "arrow":
-            dialog = LinePropertiesDialog(self, "矢印の編集", record)
-            if dialog.exec() != QDialog.DialogCode.Accepted: return
-            values = dialog.values()
-            self.view.update_arrow_properties(
-                item,
-                color=values["color"],
-                line_width=values["line_width"],
-            )
-            self._remember_annotation_defaults(
-                "arrow",
-                values,
-            )
-            return
-
-        if record_type == "check":
-            dialog = CheckPropertiesDialog(self, record)
-            if dialog.exec() != QDialog.DialogCode.Accepted: return
-            values = dialog.values()
-            self.view.update_check_properties(
-                item,
-                color=values["color"],
-                size=values["size"],
-                line_width=values["line_width"],
-            )
-            self._remember_annotation_defaults(
-                "check",
-                values,
-            )
-            return
-
-        if record_type in {"rectangle", "cloud"}:
-            title = (
-                "矩形の編集"
-                if record_type == "rectangle"
-                else "クラウドの編集"
-            )
-            dialog = ShapeContentDialog(self, title, record)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-
-            values = dialog.values()
-            self.view.update_shape_properties(
-                item,
-                values["text"],
-                font_size=record.get("font_size", 11.0),
-                fill_enabled=values["fill_enabled"],
-                fill_opacity=values["fill_opacity"],
-                fill_color=values["fill_color"],
-                text_color=values["text_color"],
-                border_color=values["border_color"],
-                line_width=values["line_width"],
-            )
-            self._remember_annotation_defaults(
-                record_type,
-                {
-                    "color": values["border_color"],
-                    "line_width": values["line_width"],
-                    "text_color": values["text_color"],
-                    "fill_enabled": values["fill_enabled"],
-                    "fill_opacity": values["fill_opacity"],
-                    "fill_color": values["fill_color"],
-                    "font_size": record.get("font_size", 11.0),
-                },
-            )
+        self.annotation_properties_toggle.setChecked(True)
+        self.annotation_properties_dock.raise_()
 
 
     def _commit_pending_annotations(self):
@@ -1798,6 +4112,16 @@ class MainWindow(QMainWindow):
                     annotation.get("color", "black"),
                     annotation.get("size", 72.0),
                     annotation.get("line_width", 1.5),
+                )
+            elif annotation["type"] == "freehand":
+                self.document.add_freehand(
+                    annotation["page_index"],
+                    annotation["x"],
+                    annotation["y"],
+                    annotation.get("points", []),
+                    annotation.get("color", "#dc0000"),
+                    annotation.get("line_width", 2.0),
+                    annotation.get("opacity", 1.0),
                 )
             elif annotation["type"] == "arrow":
                 self.document.add_arrow(
@@ -1872,6 +4196,9 @@ class MainWindow(QMainWindow):
         self.arrow_action.setEnabled(has_pdf)
         self.rectangle_action.setEnabled(has_pdf)
         self.ellipse_action.setEnabled(has_pdf)
+        self.freehand_action.setEnabled(has_pdf)
+        self.highlighter_action.setEnabled(has_pdf)
+        self.eraser_action.setEnabled(has_pdf)
         self.cloud_action.setEnabled(has_pdf)
         if not has_pdf:
             self.undo_action.setEnabled(False)
@@ -1902,7 +4229,7 @@ class MainWindow(QMainWindow):
             f"/ {busy} / 細線{state} / cache {cache_count} "
         )
 
-    def show_document(self):
+    def show_document(self, schedule_render=True):
         layouts = self.render_manager.get_page_layouts(
             self.document
         )
@@ -1910,11 +4237,161 @@ class MainWindow(QMainWindow):
         self.view.scroll_to_page(self.current_page)
         self.update_toolbar()
         self.update_render_label()
-        self.schedule_visible_tile_render()
 
-    def schedule_visible_tile_render(self):
+        if schedule_render:
+            self.schedule_visible_tile_render()
+
+
+    def _on_scroll_position_changed(self, value):
+        if not self.document.has_document():
+            return
+
+        self._scroll_interacting = True
+        self.scroll_settle_timer.start()
+
+    def _on_scroll_slider_pressed(self):
+        self._scroll_slider_held = True
+        self._scroll_interacting = True
+        self.scroll_settle_timer.stop()
+
+    def _on_scroll_slider_released(self):
+        self._scroll_slider_held = False
+        self.scroll_settle_timer.start()
+
+    def _finish_scroll_interaction(self):
+        if self._scroll_slider_held:
+            return
+
+        self._scroll_interacting = False
+
+        result = self._deferred_render_result
+        self._deferred_render_result = None
+
+        if (
+            result is not None
+            and self.render_pipeline.is_current(
+                result.generation
+            )
+        ):
+            self.view.apply_rendered_pages(
+                result.pages
+            )
+            self.update_render_label()
+
+        # Ensure the final viewport receives a render request even if the
+        # last visible-region signal occurred while the user was moving.
         if self.document.has_document():
             self.visible_tile_timer.start()
+
+
+    def _begin_initial_render(self, index, path):
+        self.render_timer.stop()
+        self.visible_tile_timer.stop()
+        self.scroll_settle_timer.stop()
+        self._deferred_render_result = None
+
+        self._initial_render_stage = "preview"
+        self._initial_render_generation = None
+        self._initial_render_started_at = perf_counter()
+        self._initial_render_path = str(path)
+        self._initial_render_tab_index = int(index)
+
+        QTimer.singleShot(
+            0,
+            lambda: self._start_initial_preview(
+                index
+            ),
+        )
+
+    def _start_initial_preview(self, index):
+        if (
+            index != self._active_document_tab
+            and self._active_document_tab >= 0
+        ):
+            return
+
+        if (
+            index < 0
+            or index >= len(self._document_tabs)
+            or not self.document.has_document()
+        ):
+            return
+
+        self.render_timer.stop()
+        self.visible_tile_timer.stop()
+
+        regions = self.view.visible_page_regions(
+            prefetch_viewports=0.0
+        )
+        if not regions:
+            QTimer.singleShot(
+                30,
+                lambda: self._start_initial_preview(
+                    index
+                ),
+            )
+            return
+
+        request = self.render_pipeline.create_request(
+            regions,
+            self.view.zoom_factor,
+            self._device_pixel_ratio(),
+            render_scale_override=1.0,
+        )
+        self._initial_render_generation = (
+            request.generation
+        )
+        self.render_pipeline.submit(
+            self.document,
+            request,
+        )
+        self.update_render_label()
+
+    def _start_initial_high_resolution(self):
+        if (
+            self._initial_render_stage != "highres"
+            or not self.document.has_document()
+        ):
+            return
+
+        regions = self.view.visible_page_regions(
+            prefetch_viewports=0.0
+        )
+        if not regions:
+            return
+
+        request = self.render_pipeline.create_request(
+            regions,
+            self.view.zoom_factor,
+            self._device_pixel_ratio(),
+        )
+        self._initial_render_generation = (
+            request.generation
+        )
+        self.render_pipeline.submit(
+            self.document,
+            request,
+        )
+        self.update_render_label()
+
+    def _log_initial_timing(self, label, elapsed_ms):
+        print(
+            "[PDFInspector startup] "
+            f"{label}: {elapsed_ms:.1f} ms"
+        )
+
+    def schedule_visible_tile_render(self):
+        if not self.document.has_document():
+            return
+
+        if self._initial_render_stage is not None:
+            return
+
+        if self.render_timer.isActive():
+            return
+
+        self.visible_tile_timer.start()
+
 
     def render_visible_tiles(self):
         if not self.document.has_document():
@@ -1936,10 +4413,80 @@ class MainWindow(QMainWindow):
         self.update_render_label()
 
     def on_render_result(self, result):
-        if not self.render_pipeline.is_current(result.generation):
+        if not self.render_pipeline.is_current(
+            result.generation
+        ):
             return
-        self.view.apply_rendered_pages(result.pages)
+
+        if (
+            self._initial_render_stage is not None
+            and result.generation
+            == self._initial_render_generation
+        ):
+            self.view.apply_rendered_pages(
+                result.pages
+            )
+            self.update_render_label()
+
+            elapsed = 0.0
+            if self._initial_render_started_at is not None:
+                elapsed = (
+                    perf_counter()
+                    - self._initial_render_started_at
+                ) * 1000.0
+
+            if self._initial_render_stage == "preview":
+                self._log_initial_timing(
+                    "Low-resolution preview",
+                    elapsed,
+                )
+                self._initial_render_stage = "highres"
+                self._initial_render_started_at = (
+                    perf_counter()
+                )
+                QTimer.singleShot(
+                    0,
+                    self._start_initial_high_resolution,
+                )
+                return
+
+            if self._initial_render_stage == "highres":
+                self._log_initial_timing(
+                    "High-resolution replacement",
+                    elapsed,
+                )
+
+                if self._initial_open_started_at is not None:
+                    self._log_initial_timing(
+                        "Total first display",
+                        (
+                            perf_counter()
+                            - self._initial_open_started_at
+                        )
+                        * 1000.0,
+                    )
+
+                self._initial_render_stage = None
+                self._initial_render_generation = None
+                self._initial_render_started_at = None
+
+                # Populate the normal surrounding cache after the visible
+                # viewport has already become sharp and interactive.
+                QTimer.singleShot(
+                    120,
+                    self.schedule_visible_tile_render,
+                )
+                return
+
+        if self._scroll_interacting:
+            self._deferred_render_result = result
+            return
+
+        self.view.apply_rendered_pages(
+            result.pages
+        )
         self.update_render_label()
+
 
     def on_render_failed(self, generation, details):
         if not self.render_pipeline.is_current(generation):
@@ -1963,13 +4510,23 @@ class MainWindow(QMainWindow):
         # flash between invalidation and the asynchronous render result.
         self.render_pipeline.invalidate()
         self.update_render_label()
-        self.schedule_visible_tile_render()
+
+        # The zoom timer has fired, so directly start the final tile debounce.
+        self.visible_tile_timer.start()
 
     def on_zoom_changed(self, zoom_factor):
         self.update_zoom_display(zoom_factor)
         self.update_render_label()
-        if self.document.has_document():
-            self.render_timer.start()
+
+        if not self.document.has_document():
+            return
+
+        if self._initial_render_stage is not None:
+            return
+
+        self.visible_tile_timer.stop()
+        self.render_timer.start()
+
 
     def toggle_hairline(self, enabled):
         self.render_pipeline.invalidate()
@@ -1991,28 +4548,52 @@ class MainWindow(QMainWindow):
 
     def open_pdf_path(self, path):
         path = str(Path(path))
-        try:
-            self.document.open(path)
-            self.selected_date_stamp_item = None
-            self.view.clear_pending_annotations()
-            self.render_pipeline.invalidate()
-            self.render_manager.clear()
-            self.render_manager.prepare_document(self.document)
-            self.current_page = 0
-            self.show_document()
-            self.view.fit_to_width()
-            self.setWindowTitle(f"{Path(path).name} - PDFInspector")
-            return True
-        except PDFOpenError as error:
-            QMessageBox.critical(
-                self,
-                "PDFを開けません",
-                str(error),
+
+        existing_index = self._find_document_tab(path)
+        if existing_index >= 0:
+            self.document_tab_bar.setCurrentIndex(
+                existing_index
             )
+            self.on_document_tab_changed(
+                existing_index
+            )
+            return True
+
+        self._capture_active_document_tab()
+
+        session = self._new_document_session(path)
+        self._document_tabs.append(session)
+
+        self._switching_document_tab = True
+        try:
+            index = self.document_tab_bar.addTab(
+                Path(path).name
+            )
+            self.document_tab_bar.setTabToolTip(
+                index,
+                path,
+            )
+            self.document_tab_bar.setCurrentIndex(
+                index
+            )
+        finally:
+            self._switching_document_tab = False
+
+        if not self._load_document_session(index):
+            self._switching_document_tab = True
+            try:
+                self.document_tab_bar.removeTab(index)
+                self._document_tabs.pop(index)
+            finally:
+                self._switching_document_tab = False
             return False
 
-    @staticmethod
-    def _dropped_local_paths(mime_data):
+        self._active_document_tab = index
+        self.document_tab_toolbar.show()
+        return True
+
+
+    def _dropped_local_paths(self, mime_data):
         paths = []
         if not mime_data.hasUrls():
             return paths
@@ -2025,11 +4606,20 @@ class MainWindow(QMainWindow):
         return paths
 
     def dragEnterEvent(self, event):
-        paths = self._dropped_local_paths(event.mimeData())
-        if any(path.suffix.lower() == ".pdf" for path in paths):
-            event.acceptProposedAction()
+        paths = self._dropped_local_paths(
+            event.mimeData()
+        )
+        if any(
+            path.suffix.lower() == ".pdf"
+            for path in paths
+        ):
+            event.setDropAction(
+                Qt.DropAction.CopyAction
+            )
+            event.accept()
         else:
             event.ignore()
+
 
     def dragMoveEvent(self, event):
         paths = self._dropped_local_paths(event.mimeData())
@@ -2038,10 +4628,35 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
+    def dragMoveEvent(self, event):
+        paths = self._dropped_local_paths(
+            event.mimeData()
+        )
+        if any(
+            path.suffix.lower() == ".pdf"
+            for path in paths
+        ):
+            event.setDropAction(
+                Qt.DropAction.CopyAction
+            )
+            event.accept()
+        else:
+            event.ignore()
+
     def dropEvent(self, event):
-        paths = self._dropped_local_paths(event.mimeData())
-        pdf_paths = [path for path in paths if path.suffix.lower() == ".pdf"]
-        unsupported = [path for path in paths if path.suffix.lower() != ".pdf"]
+        paths = self._dropped_local_paths(
+            event.mimeData()
+        )
+        pdf_paths = [
+            path
+            for path in paths
+            if path.suffix.lower() == ".pdf"
+        ]
+        unsupported = [
+            path
+            for path in paths
+            if path.suffix.lower() != ".pdf"
+        ]
 
         if not pdf_paths:
             QMessageBox.information(
@@ -2052,29 +4667,27 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
-        # The current application is still single-document. Open the first
-        # dropped PDF now; Task020 multi-tab support will open every PDF in
-        # its own tab without changing this drop interface.
-        opened = self.open_pdf_path(pdf_paths[0])
-        if opened:
-            event.acceptProposedAction()
+        opened_count = 0
+        for path in pdf_paths:
+            if self.open_pdf_path(path):
+                opened_count += 1
 
-        messages = []
-        if len(pdf_paths) > 1:
-            messages.append(
-                f"現在は1ファイル表示のため、先頭のPDFだけ開きました。"
-                f"\n残り {len(pdf_paths) - 1} ファイルはマルチタブ対応時に開けるようになります。"
+        if opened_count:
+            event.setDropAction(
+                Qt.DropAction.CopyAction
             )
+            event.accept()
+        else:
+            event.ignore()
+
         if unsupported:
-            messages.append(
-                f"PDF以外の {len(unsupported)} ファイルは開きませんでした。"
-            )
-        if messages:
             QMessageBox.information(
                 self,
                 "ドラッグ＆ドロップ",
-                "\n\n".join(messages),
+                f"PDF以外の {len(unsupported)} ファイルは"
+                "開きませんでした。",
             )
+
 
     def next_page(self):
         if (
@@ -2103,6 +4716,10 @@ class MainWindow(QMainWindow):
         if page != self.current_page:
             self.current_page = page
             self.update_toolbar()
+
+        if hasattr(self, "page_thumbnail_panel"):
+            self.page_thumbnail_panel.select_page(page)
+
 
     def change_zoom(self, index):
         self.apply_zoom_text(
@@ -2169,6 +4786,22 @@ class MainWindow(QMainWindow):
         try:
             self._commit_pending_annotations()
             self.document.save_as(path)
+
+            if (
+                0 <= self._active_document_tab
+                < len(self._document_tabs)
+            ):
+                self._document_tabs[
+                    self._active_document_tab
+                ]["path"] = path
+                self.document_tab_bar.setTabText(
+                    self._active_document_tab,
+                    Path(path).name,
+                )
+                self.document_tab_bar.setTabToolTip(
+                    self._active_document_tab,
+                    path,
+                )
         except PDFSaveError as error:
             QMessageBox.critical(
                 self,
@@ -2225,8 +4858,13 @@ class MainWindow(QMainWindow):
             self.schedule_visible_tile_render()
 
     def closeEvent(self, event):
+        self._capture_active_document_tab()
         self.render_timer.stop()
         self.visible_tile_timer.stop()
+        self.scroll_settle_timer.stop()
+        self._initial_render_stage = None
+        self._initial_render_generation = None
         self.render_pipeline.shutdown()
         self.document.close()
         event.accept()
+

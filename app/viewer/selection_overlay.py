@@ -140,26 +140,37 @@ class SelectionOverlay(QGraphicsObject):
         if self.target is None:
             return
 
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(
-            QPen(
-                QColor(40, 120, 230),
-                1.0,
-                Qt.PenStyle.DashLine,
-            )
+        painter.save()
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceOver
         )
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing,
+            False,
+        )
+
+        border_pen = QPen(
+            QColor(40, 120, 230, 210),
+            0.0,
+            Qt.PenStyle.DashLine,
+        )
+        border_pen.setCosmetic(True)
+        painter.setPen(border_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
         if self._record_type() != "arrow":
             painter.drawRect(self._geometry)
 
-        painter.setPen(
-            QPen(
-                QColor(40, 120, 230),
-                self._scene_units(1.0),
-            )
+        handle_pen = QPen(
+            QColor(40, 120, 230, 235),
+            0.0,
         )
-        painter.setBrush(QBrush(QColor(255, 255, 255)))
+        handle_pen.setCosmetic(True)
+        painter.setPen(handle_pen)
+        painter.setBrush(
+            QBrush(QColor(255, 255, 255, 40))
+        )
+
         radius = self._scene_units(self.HANDLE_RADIUS)
         for point in self._handles.values():
             painter.drawEllipse(
@@ -167,6 +178,9 @@ class SelectionOverlay(QGraphicsObject):
                 radius,
                 radius,
             )
+
+        painter.restore()
+
 
     def _handle_at(self, point):
         best_name = None

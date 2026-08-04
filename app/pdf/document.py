@@ -1,4 +1,8 @@
+import os
+import tempfile
+
 import fitz
+from PySide6.QtGui import QImage
 
 
 class PDFDocumentError(Exception):
@@ -22,6 +26,8 @@ class PDFDocument:
     def __init__(self):
         self.doc = None
         self.path = ""
+        self.structure_dirty = False
+
 
     def open(self, path):
         try:
@@ -42,6 +48,8 @@ class PDFDocument:
         self.close()
         self.doc = document
         self.path = path
+        self.structure_dirty = False
+
 
     def close(self):
         if self.doc:
@@ -49,6 +57,8 @@ class PDFDocument:
 
         self.doc = None
         self.path = ""
+        self.structure_dirty = False
+
 
     def has_document(self):
         return self.doc is not None
@@ -61,16 +71,42 @@ class PDFDocument:
             raise PDFSaveError("保存先が設定されていません。")
 
         try:
-            self.doc.save(
-                self.path,
-                incremental=True,
-                encryption=fitz.PDF_ENCRYPT_KEEP
+            if not self.structure_dirty:
+                self.doc.save(
+                    self.path,
+                    incremental=True,
+                    encryption=fitz.PDF_ENCRYPT_KEEP,
+                )
+                return
+
+            original_path = self.path
+            folder = os.path.dirname(original_path)
+            fd, temporary_path = tempfile.mkstemp(
+                suffix=".pdf",
+                dir=folder,
             )
+            os.close(fd)
+
+            try:
+                self.doc.save(
+                    temporary_path,
+                    garbage=4,
+                    deflate=True,
+                )
+                self.doc.close()
+                self.doc = None
+                os.replace(temporary_path, original_path)
+                self.open(original_path)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+
         except Exception as error:
             raise PDFSaveError(
                 "PDFを上書き保存できませんでした。\n"
                 "ファイルが別のアプリで使用中か、書き込み権限がない可能性があります。"
             ) from error
+
 
     def save_as(self, path):
         if self.doc is None:
@@ -85,6 +121,8 @@ class PDFDocument:
             ) from error
 
         self.path = path
+        self.structure_dirty = False
+
 
     @property
     def page_count(self):
@@ -117,6 +155,245 @@ class PDFDocument:
         if page.rotation:
             point = point * page.derotation_matrix
         return point
+
+
+
+
+    def export_page(
+        self,
+        page_index,
+        output_path,
+    ):
+        if self.doc is None:
+            raise PDFSaveError(
+                "保存するPDFが開かれていません。"
+            )
+
+        page_index = int(page_index)
+        if (
+            page_index < 0
+            or page_index >= len(self.doc)
+        ):
+            raise PDFSaveError(
+                "指定されたページが存在しません。"
+            )
+
+        output = fitz.open()
+        try:
+            output.insert_pdf(
+                self.doc,
+                from_page=page_index,
+                to_page=page_index,
+            )
+            output.save(
+                str(output_path),
+                garbage=4,
+                deflate=True,
+            )
+        except Exception as error:
+            raise PDFSaveError(
+                "1ページPDFを保存できませんでした。\n"
+                "保存先の権限や空き容量を確認してください。"
+            ) from error
+        finally:
+            output.close()
+
+    def split_to_pages(
+        self,
+        output_directory,
+        base_name,
+    ):
+        if self.doc is None:
+            raise PDFSaveError(
+                "分割するPDFが開かれていません。"
+            )
+
+        output_directory = os.path.abspath(
+            str(output_directory)
+        )
+        os.makedirs(
+            output_directory,
+            exist_ok=True,
+        )
+
+        safe_base_name = str(
+            base_name or "document"
+        ).strip() or "document"
+
+        digits = max(
+            3,
+            len(str(len(self.doc))),
+        )
+        saved_paths = []
+
+        try:
+            for page_index in range(len(self.doc)):
+                output = fitz.open()
+                try:
+                    output.insert_pdf(
+                        self.doc,
+                        from_page=page_index,
+                        to_page=page_index,
+                    )
+
+                    filename = (
+                        f"{safe_base_name}_"
+                        f"{page_index + 1:0{digits}d}.pdf"
+                    )
+                    output_path = os.path.join(
+                        output_directory,
+                        filename,
+                    )
+
+                    output.save(
+                        output_path,
+                        garbage=4,
+                        deflate=True,
+                    )
+                    saved_paths.append(
+                        output_path
+                    )
+                finally:
+                    output.close()
+
+        except Exception as error:
+            raise PDFSaveError(
+                "PDFの分割保存に失敗しました。\n"
+                "保存先の権限、空き容量、同名ファイルを確認してください。"
+            ) from error
+
+        return saved_paths
+
+    def get_external_page_count(self, path):
+        try:
+            source = fitz.open(path)
+        except Exception as error:
+            raise PDFOpenError(
+                "追加元のPDFを開けませんでした。\n"
+                "ファイルが破損しているか、PDF形式ではない可能性があります。"
+            ) from error
+
+        try:
+            if source.needs_pass:
+                raise PDFPasswordRequiredError(
+                    "追加元のPDFはパスワードで保護されています。"
+                )
+            return len(source)
+        finally:
+            source.close()
+
+    def insert_pdf_pages(self, path, insertion_index):
+        if self.doc is None:
+            raise PDFOpenError(
+                "追加先のPDFが開かれていません。"
+            )
+
+        try:
+            source = fitz.open(path)
+        except Exception as error:
+            raise PDFOpenError(
+                "追加元のPDFを開けませんでした。\n"
+                "ファイルが破損しているか、PDF形式ではない可能性があります。"
+            ) from error
+
+        try:
+            if source.needs_pass:
+                raise PDFPasswordRequiredError(
+                    "追加元のPDFはパスワードで保護されています。"
+                )
+
+            count = len(source)
+            if count <= 0:
+                return 0
+
+            insertion_index = max(
+                0,
+                min(int(insertion_index), len(self.doc)),
+            )
+
+            self.doc.insert_pdf(
+                source,
+                from_page=0,
+                to_page=count - 1,
+                start_at=insertion_index,
+            )
+            self.structure_dirty = True
+            return count
+
+        except PDFOpenError:
+            raise
+        except Exception as error:
+            raise PDFOpenError(
+                "PDFページの追加に失敗しました。"
+            ) from error
+        finally:
+            source.close()
+
+    def render_thumbnail(self, page_index, max_width=150, max_height=210):
+        page = self.get_page(int(page_index))
+        if page is None:
+            return None
+
+        rect = page.rect
+        if rect.width <= 0 or rect.height <= 0:
+            return None
+
+        scale = min(
+            float(max_width) / float(rect.width),
+            float(max_height) / float(rect.height),
+        )
+        scale = max(scale, 0.05)
+
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(scale, scale),
+            alpha=False,
+            annots=True,
+        )
+
+        image_format = (
+            QImage.Format.Format_RGB888
+            if pixmap.n == 3
+            else QImage.Format.Format_RGBA8888
+        )
+        return QImage(
+            pixmap.samples,
+            pixmap.width,
+            pixmap.height,
+            pixmap.stride,
+            image_format,
+        ).copy()
+
+    def reorder_pages(self, order):
+        if self.doc is None:
+            return
+        order = [int(index) for index in order]
+        if sorted(order) != list(range(len(self.doc))):
+            raise ValueError("ページ順序が不正です。")
+        self.doc.select(order)
+        self.structure_dirty = True
+
+    def duplicate_page(self, page_index):
+        if self.doc is None:
+            return
+        page_index = int(page_index)
+        if 0 <= page_index < len(self.doc):
+            self.doc.copy_page(page_index, to=page_index + 1)
+            self.structure_dirty = True
+
+    def delete_page(self, page_index):
+        if self.doc is None:
+            return
+        page_index = int(page_index)
+        if 0 <= page_index < len(self.doc):
+            self.doc.delete_page(page_index)
+            self.structure_dirty = True
+
+    def rotate_page(self, page_index, degrees):
+        page = self.get_page(int(page_index))
+        if page is None:
+            return
+        page.set_rotation((int(page.rotation) + int(degrees)) % 360)
+        self.structure_dirty = True
 
     def add_checkmark(self, page_index, x, y, size=15.0, color="#dc0000", line_width=2.2):
         page = self.get_page(page_index)
@@ -252,6 +529,32 @@ class PDFDocument:
                     align=fitz.TEXT_ALIGN_CENTER,
                 )
 
+
+    def add_freehand(
+        self,
+        page_index,
+        x,
+        y,
+        points,
+        color="#dc0000",
+        line_width=2.0,
+        opacity=1.0,
+    ):
+        page = self._document[int(page_index)]
+        ink_points = [
+            fitz.Point(float(x) + float(p[0]), float(y) + float(p[1]))
+            for p in points
+            if isinstance(p, (list, tuple)) and len(p) >= 2
+        ]
+        if len(ink_points) < 2:
+            return None
+        rgb = self._parse_annotation_color(color, fallback=(0.86, 0.0, 0.0))
+        annot = page.add_ink_annot([ink_points])
+        annot.set_colors(stroke=rgb)
+        annot.set_border(width=max(float(line_width), 0.5))
+        annot.set_opacity(min(max(float(opacity), 0.05), 1.0))
+        annot.update()
+        return annot
 
     def add_arrow(
         self,

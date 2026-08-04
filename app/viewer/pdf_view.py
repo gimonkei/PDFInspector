@@ -514,7 +514,36 @@ class ShapeAnnotationItem(QGraphicsObject):
         return None
 
     def paint(self, painter, option, widget=None):
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.save()
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing,
+            True,
+        )
+
+        record_type = self.record.get("type")
+        shape_path = QPainterPath()
+
+        if record_type == "ellipse":
+            shape_path.addEllipse(self._rect())
+        elif record_type == "cloud":
+            shape_path = self._cloud_path()
+        else:
+            shape_path.addRect(self._rect())
+
+        fill_brush = self._fill_brush()
+        if fill_brush.style() != Qt.BrushStyle.NoBrush:
+            painter.save()
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Multiply
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill_brush)
+            painter.drawPath(shape_path)
+            painter.restore()
+
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceOver
+        )
         painter.setPen(
             QPen(
                 self._color(),
@@ -524,17 +553,13 @@ class ShapeAnnotationItem(QGraphicsObject):
                 Qt.PenJoinStyle.RoundJoin,
             )
         )
-        painter.setBrush(self._fill_brush())
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(shape_path)
 
-        if self.record.get("type") == "ellipse":
-            painter.drawEllipse(self._rect())
-        elif self.record.get("type") == "cloud":
-            painter.drawPath(self._cloud_path())
-        else:
-            painter.drawRect(self._rect())
-
-        if self.record.get("type") in {"rectangle", "cloud"}:
+        if record_type in {"rectangle", "cloud"}:
             self._draw_text(painter)
+
+        painter.restore()
 
 
     def hoverMoveEvent(self, event):
@@ -633,6 +658,91 @@ class ShapeAnnotationItem(QGraphicsObject):
         self.update()
 
 
+class FreehandAnnotationItem(QGraphicsPathItem):
+    MIN_WIDTH = 0.5
+
+    def __init__(self, record):
+        super().__init__()
+        self.record = record
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+            | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.refresh_from_record()
+
+    def refresh_from_record(self):
+        self.prepareGeometryChange()
+        path = QPainterPath()
+        raw_points = self.record.get("points", [])
+        points = [
+            QPointF(float(point[0]), float(point[1]))
+            for point in raw_points
+            if isinstance(point, (list, tuple))
+            and len(point) >= 2
+        ]
+
+        if points:
+            path.moveTo(points[0])
+
+            if len(points) == 2:
+                path.lineTo(points[1])
+            elif len(points) > 2:
+                for index in range(1, len(points) - 1):
+                    current = points[index]
+                    following = points[index + 1]
+                    midpoint = QPointF(
+                        (current.x() + following.x()) * 0.5,
+                        (current.y() + following.y()) * 0.5,
+                    )
+                    path.quadTo(current, midpoint)
+                path.lineTo(points[-1])
+
+        self.setPath(path)
+        color = QColor(str(self.record.get("color", "#dc0000")))
+        if not color.isValid():
+            color = QColor("#dc0000")
+        width = max(float(self.record.get("line_width", 2.0)), 0.5)
+        self.setPen(QPen(
+            color,
+            width,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        ))
+        self.setBrush(Qt.BrushStyle.NoBrush)
+        self.setOpacity(
+            min(max(float(self.record.get("opacity", 1.0)), 0.05), 1.0)
+        )
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        painter.save()
+
+        if (
+            str(self.record.get("tool", "freehand"))
+            == "highlighter"
+            or float(self.record.get("opacity", 1.0)) < 0.95
+        ):
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Multiply
+            )
+        else:
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver
+            )
+
+        super().paint(painter, option, widget)
+        painter.restore()
+
+    def shape(self):
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(float(self.record.get("line_width", 2.0)) + 8.0, 16.0))
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return stroker.createStroke(self.path())
+
+
 class PDFView(GraphicsView):
     page_changed = Signal(int)
     visible_region_changed = Signal()
@@ -650,6 +760,21 @@ class PDFView(GraphicsView):
         super().__init__()
         self.scene = QGraphicsScene()
         self.setScene(self.scene)
+
+        # Only repaint regions dirtied by moved/replaced tiles instead of the
+        # whole viewport on every scroll step.
+        self.setViewportUpdateMode(
+            QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate
+        )
+        self.setOptimizationFlag(
+            QGraphicsView.OptimizationFlag.DontSavePainterState,
+            True,
+        )
+        self.setOptimizationFlag(
+            QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing,
+            True,
+        )
+
         self._selection_overlay = SelectionOverlay(self)
         self.scene.addItem(self._selection_overlay)
 
@@ -678,6 +803,15 @@ class PDFView(GraphicsView):
         self._shape_start_hit = None
         self._shape_preview = None
         self._shape_kind = None
+        self._freehand_drawing = False
+        self._freehand_page_index = None
+        self._freehand_start_page_point = None
+        self._freehand_points = []
+        self._freehand_preview_item = None
+        self._eraser_dragging = False
+        self._eraser_before = None
+        self._eraser_deleted_ids = set()
+        self._pen_cursor_item = None
 
         self._date_stamp_preview_settings = {}
         self._date_stamp_preview_item = None
@@ -693,6 +827,16 @@ class PDFView(GraphicsView):
             "arrow": {
                 "color": "#dc0000",
                 "line_width": 2.0,
+            },
+            "freehand": {
+                "color": "#dc0000",
+                "line_width": 2.0,
+                "opacity": 1.0,
+            },
+            "highlighter": {
+                "color": "#fff000",
+                "line_width": 14.0,
+                "opacity": 0.35,
             },
             "rectangle": {
                 "color": "#dc0000",
@@ -755,7 +899,7 @@ class PDFView(GraphicsView):
 
         self._visible_signal_timer = QTimer(self)
         self._visible_signal_timer.setSingleShot(True)
-        self._visible_signal_timer.setInterval(40)
+        self._visible_signal_timer.setInterval(100)
         self._visible_signal_timer.timeout.connect(
             self.visible_region_changed.emit
         )
@@ -815,19 +959,43 @@ class PDFView(GraphicsView):
             if len(selected) == 1:
                 self._active_selection_item = selected[0]
                 if single_overlay is not None:
-                    single_overlay.set_target(selected[0])
+                    if (
+                        selected[0].record.get("type")
+                        == "freehand"
+                    ):
+                        single_overlay.clear_target()
+                    else:
+                        single_overlay.set_target(selected[0])
                 if multi_overlay is not None:
                     multi_overlay.clear()
+
             elif len(selected) > 1:
                 if self._active_selection_item not in selected:
                     self._active_selection_item = selected[-1]
+
                 if single_overlay is not None:
                     single_overlay.clear_target()
+
+                visible_overlay_items = [
+                    item
+                    for item in selected
+                    if item.record.get("type") != "freehand"
+                ]
+
                 if multi_overlay is not None:
-                    multi_overlay.set_items(
-                        selected,
-                        self._active_selection_item,
-                    )
+                    if len(visible_overlay_items) >= 2:
+                        active_overlay_item = (
+                            self._active_selection_item
+                            if self._active_selection_item
+                            in visible_overlay_items
+                            else visible_overlay_items[-1]
+                        )
+                        multi_overlay.set_items(
+                            visible_overlay_items,
+                            active_overlay_item,
+                        )
+                    else:
+                        multi_overlay.clear()
             else:
                 self._active_selection_item = None
                 if single_overlay is not None:
@@ -861,20 +1029,44 @@ class PDFView(GraphicsView):
             if len(selected) == 1:
                 self._active_selection_item = selected[0]
                 if single_overlay is not None:
-                    single_overlay.set_target(selected[0])
-                    single_overlay.refresh_geometry()
+                    if (
+                        selected[0].record.get("type")
+                        == "freehand"
+                    ):
+                        single_overlay.clear_target()
+                    else:
+                        single_overlay.set_target(selected[0])
+                        single_overlay.refresh_geometry()
                 if multi_overlay is not None:
                     multi_overlay.clear()
+
             elif len(selected) > 1:
                 if self._active_selection_item not in selected:
                     self._active_selection_item = selected[-1]
+
                 if single_overlay is not None:
                     single_overlay.clear_target()
+
+                visible_overlay_items = [
+                    item
+                    for item in selected
+                    if item.record.get("type") != "freehand"
+                ]
+
                 if multi_overlay is not None:
-                    multi_overlay.set_items(
-                        selected,
-                        self._active_selection_item,
-                    )
+                    if len(visible_overlay_items) >= 2:
+                        active_overlay_item = (
+                            self._active_selection_item
+                            if self._active_selection_item
+                            in visible_overlay_items
+                            else visible_overlay_items[-1]
+                        )
+                        multi_overlay.set_items(
+                            visible_overlay_items,
+                            active_overlay_item,
+                        )
+                    else:
+                        multi_overlay.clear()
             else:
                 self._active_selection_item = None
                 if single_overlay is not None:
@@ -1032,12 +1224,25 @@ class PDFView(GraphicsView):
         )
 
     def select_all_annotations(self):
-        if not self.has_document():
+        # PDFView does not own PDFDocument and therefore has no
+        # has_document() method. The currently materialized page origins and
+        # annotation items are the correct availability check here.
+        if not self._page_origins or not self._annotation_items:
             return False
 
         self.scene.clearSelection()
+
         for item in self._annotation_items:
-            item.setSelected(True)
+            if (
+                item.isVisible()
+                and not bool(
+                    item.record.get(
+                        "locked",
+                        False,
+                    )
+                )
+            ):
+                item.setSelected(True)
 
         selected = self._selected_annotation_items_sorted()
         if not selected:
@@ -1367,10 +1572,400 @@ class PDFView(GraphicsView):
         item.update()
         return True
 
+    def _cancel_freehand(self):
+        if not self._freehand_drawing:
+            return False
+        self._freehand_drawing = False
+        self._freehand_page_index = None
+        self._freehand_start_page_point = None
+        self._freehand_points = []
+        item = self._freehand_preview_item
+        self._freehand_preview_item = None
+        if item is not None:
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
+        return True
+
+    def _start_freehand(self, page_index, page_point):
+        self._cancel_freehand()
+        origin = self._page_origins.get(int(page_index))
+        if origin is None:
+            return False
+        self._freehand_drawing = True
+        self._freehand_page_index = int(page_index)
+        self._freehand_start_page_point = QPointF(page_point)
+        self._freehand_points = [[0.0, 0.0]]
+        settings = self._drawing_settings()
+        record = {
+            "type": "freehand",
+            "page_index": int(page_index),
+            "x": float(page_point.x()),
+            "y": float(page_point.y()),
+            "points": [[0.0, 0.0]],
+            "color": str(settings.get("color", "#dc0000")),
+            "line_width": float(settings.get("line_width", 2.0)),
+            "opacity": float(settings.get("opacity", 1.0)),
+            "tool": self.annotation_mode,
+            "z": 10000.0,
+        }
+        item = FreehandAnnotationItem(record)
+        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        item.setOpacity(0.75)
+        item.setPos(origin[0] + page_point.x(), origin[1] + page_point.y())
+        item.setZValue(10000.0)
+        self.scene.addItem(item)
+        self._freehand_preview_item = item
+        return True
+
+    def _append_freehand_point(self, page_point):
+        if not self._freehand_drawing or self._freehand_preview_item is None:
+            return
+        relative = QPointF(page_point) - self._freehand_start_page_point
+        last = self._freehand_points[-1]
+        dx = relative.x() - last[0]
+        dy = relative.y() - last[1]
+        if dx * dx + dy * dy < 1.0:
+            return
+        self._freehand_points.append([float(relative.x()), float(relative.y())])
+        self._freehand_preview_item.record["points"] = [
+            list(point) for point in self._freehand_points
+        ]
+        self._freehand_preview_item.refresh_from_record()
+
+    def _finish_freehand(self):
+        if not self._freehand_drawing:
+            return False
+        page_index = self._freehand_page_index
+        start_point = self._freehand_start_page_point
+        points = [list(point) for point in self._freehand_points]
+        self._cancel_freehand()
+        if page_index is None or start_point is None or len(points) < 2:
+            return False
+        before = self._history_snapshot()
+        points = self._rdp_points(points, 0.75)
+        settings = self._drawing_settings()
+        record = {
+            "type": "freehand",
+            "page_index": int(page_index),
+            "x": float(start_point.x()),
+            "y": float(start_point.y()),
+            "points": points,
+            "color": str(settings.get("color", "#dc0000")),
+            "line_width": float(settings.get("line_width", 2.0)),
+            "opacity": float(settings.get("opacity", 1.0)),
+            "tool": self.annotation_mode,
+            "z": self._next_annotation_z(),
+        }
+        self._annotation_records.append(record)
+        item = self._create_annotation_item(record)
+        if item is not None:
+            self.scene.clearSelection()
+            item.setSelected(True)
+            self._active_selection_item = item
+            self.annotation_selected.emit(item)
+        self._commit_history_change(before)
+        return True
+
+    def update_freehand_properties(self, item, color=None, line_width=None, opacity=None):
+        record = getattr(item, "record", None)
+        if not record or record.get("type") != "freehand":
+            return False
+        before = self._history_snapshot()
+        if color is not None:
+            parsed = QColor(str(color))
+            if parsed.isValid():
+                record["color"] = parsed.name(QColor.NameFormat.HexRgb)
+        if line_width is not None:
+            record["line_width"] = max(float(line_width), 0.5)
+        if opacity is not None:
+            record["opacity"] = min(max(float(opacity), 0.05), 1.0)
+        item.refresh_from_record()
+        self._refresh_selection_overlay()
+        self._commit_history_change(before)
+        return True
+
+
+    def _rdp_points(self, points, epsilon):
+        if len(points) < 3:
+            return [list(point) for point in points]
+
+        start = QPointF(float(points[0][0]), float(points[0][1]))
+        end = QPointF(float(points[-1][0]), float(points[-1][1]))
+        line = end - start
+        length_sq = line.x() * line.x() + line.y() * line.y()
+        maximum = -1.0
+        split = 0
+
+        for index in range(1, len(points) - 1):
+            point = QPointF(float(points[index][0]), float(points[index][1]))
+            if length_sq <= 1e-9:
+                delta = point - start
+                distance = (delta.x() ** 2 + delta.y() ** 2) ** 0.5
+            else:
+                t = (
+                    (point.x() - start.x()) * line.x()
+                    + (point.y() - start.y()) * line.y()
+                ) / length_sq
+                t = min(max(t, 0.0), 1.0)
+                projection = start + line * t
+                delta = point - projection
+                distance = (delta.x() ** 2 + delta.y() ** 2) ** 0.5
+
+            if distance > maximum:
+                maximum = distance
+                split = index
+
+        if maximum > float(epsilon):
+            left = self._rdp_points(points[: split + 1], epsilon)
+            right = self._rdp_points(points[split:], epsilon)
+            return left[:-1] + right
+
+        return [list(points[0]), list(points[-1])]
+
+    def _drawing_settings(self):
+        key = "highlighter" if self.annotation_mode == "highlighter" else "freehand"
+        return self.annotation_defaults(key)
+
+    def _update_pen_cursor(self, viewport_pos=None):
+        if self.annotation_mode not in {"freehand", "highlighter", "eraser"}:
+            if self._pen_cursor_item is not None:
+                self._pen_cursor_item.setVisible(False)
+            return
+
+        if self._pen_cursor_item is None:
+            self._pen_cursor_item = QGraphicsEllipseItem()
+            self._pen_cursor_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._pen_cursor_item.setZValue(20000.0)
+            self.scene.addItem(self._pen_cursor_item)
+
+        if viewport_pos is None:
+            self._pen_cursor_item.setVisible(False)
+            return
+
+        point = self.mapToScene(viewport_pos)
+        if self.annotation_mode == "eraser":
+            diameter = 18.0 / max(self.zoom_factor, 0.01)
+            pen = QPen(QColor("#666666"), 1.0, Qt.PenStyle.DashLine)
+        else:
+            settings = self._drawing_settings()
+            diameter = max(
+                float(settings.get("line_width", 2.0)),
+                4.0 / max(self.zoom_factor, 0.01),
+            )
+            color = QColor(str(settings.get("color", "#dc0000")))
+            if not color.isValid():
+                color = QColor("#dc0000")
+            pen = QPen(color, 1.0)
+
+        self._pen_cursor_item.setRect(
+            point.x() - diameter / 2.0,
+            point.y() - diameter / 2.0,
+            diameter,
+            diameter,
+        )
+        self._pen_cursor_item.setPen(pen)
+        self._pen_cursor_item.setBrush(Qt.BrushStyle.NoBrush)
+        self._pen_cursor_item.setVisible(True)
+
+    @staticmethod
+    def _distance_to_segment(point, start, end):
+        segment = end - start
+        length_sq = (
+            segment.x() * segment.x()
+            + segment.y() * segment.y()
+        )
+
+        if length_sq <= 1e-9:
+            delta = point - start
+            return (
+                delta.x() * delta.x()
+                + delta.y() * delta.y()
+            ) ** 0.5
+
+        t = (
+            (point.x() - start.x()) * segment.x()
+            + (point.y() - start.y()) * segment.y()
+        ) / length_sq
+        t = min(max(t, 0.0), 1.0)
+
+        projection = start + segment * t
+        delta = point - projection
+        return (
+            delta.x() * delta.x()
+            + delta.y() * delta.y()
+        ) ** 0.5
+
+    def _split_freehand_record(
+        self,
+        record,
+        eraser_point,
+        eraser_radius,
+    ):
+        raw_points = record.get("points", [])
+        if len(raw_points) < 2:
+            return [record], False
+
+        origin = QPointF(
+            float(record.get("x", 0.0)),
+            float(record.get("y", 0.0)),
+        )
+        absolute_points = [
+            origin
+            + QPointF(
+                float(point[0]),
+                float(point[1]),
+            )
+            for point in raw_points
+            if isinstance(point, (list, tuple))
+            and len(point) >= 2
+        ]
+
+        if len(absolute_points) < 2:
+            return [record], False
+
+        fragments = []
+        current = []
+
+        for index in range(len(absolute_points) - 1):
+            start = absolute_points[index]
+            end = absolute_points[index + 1]
+            hit = (
+                self._distance_to_segment(
+                    eraser_point,
+                    start,
+                    end,
+                )
+                <= eraser_radius
+            )
+
+            if hit:
+                if len(current) >= 2:
+                    fragments.append(current)
+                current = []
+                continue
+
+            if not current:
+                current.append(start)
+            current.append(end)
+
+        if len(current) >= 2:
+            fragments.append(current)
+
+        if (
+            len(fragments) == 1
+            and len(fragments[0]) == len(absolute_points)
+        ):
+            return [record], False
+
+        new_records = []
+        base_z = float(record.get("z", 20.0))
+
+        for fragment_index, fragment in enumerate(fragments):
+            first = fragment[0]
+            fragment_record = deepcopy(record)
+            fragment_record["id"] = str(uuid.uuid4())
+            fragment_record["x"] = float(first.x())
+            fragment_record["y"] = float(first.y())
+            fragment_record["points"] = [
+                [
+                    float(point.x() - first.x()),
+                    float(point.y() - first.y()),
+                ]
+                for point in fragment
+            ]
+            fragment_record["z"] = (
+                base_z + fragment_index * 0.001
+            )
+            new_records.append(fragment_record)
+
+        return new_records, True
+
+    def _erase_freehand_at(self, viewport_pos):
+        scene_point = self.mapToScene(viewport_pos)
+        hit = self._page_point_at(scene_point)
+        if hit is None:
+            return False
+
+        page_index, page_point = hit
+        eraser_radius = 9.0 / max(
+            float(self.zoom_factor),
+            0.01,
+        )
+
+        replacement_records = []
+        changed = False
+
+        for record in self._annotation_records:
+            if (
+                record.get("type") != "freehand"
+                or int(record.get("page_index", -1))
+                != int(page_index)
+            ):
+                replacement_records.append(record)
+                continue
+
+            fragments, record_changed = (
+                self._split_freehand_record(
+                    record,
+                    QPointF(page_point),
+                    eraser_radius,
+                )
+            )
+            replacement_records.extend(fragments)
+            changed = changed or record_changed
+
+        if not changed:
+            return False
+
+        self._annotation_records = replacement_records
+        self.scene.clearSelection()
+        self._active_selection_item = None
+        self._restore_annotation_items()
+        self.selection_count_changed.emit(0)
+        self.annotation_selected.emit(None)
+        return True
+
+
+    def _start_eraser(self, viewport_pos):
+        self._sync_annotation_records()
+        self.scene.clearSelection()
+        self._active_selection_item = None
+
+        self._eraser_dragging = True
+        self._eraser_before = self._history_snapshot()
+        self._eraser_deleted_ids = set()
+
+        self._erase_freehand_at(viewport_pos)
+        return True
+
+
+    def _finish_eraser(self):
+        if not self._eraser_dragging:
+            return False
+
+        self._eraser_dragging = False
+        before = self._eraser_before
+        self._eraser_before = None
+        self._eraser_deleted_ids = set()
+
+        self._commit_history_change(before)
+        self._refresh_selection_overlay()
+        return True
+
+
     def set_annotation_mode(self, mode):
         if mode != "date_stamp":
             self._remove_date_stamp_preview()
-        if mode not in {"hand", "check", "comment", "date_stamp", "arrow", "rectangle", "ellipse", "cloud"}:
+        if mode not in {"freehand", "highlighter"}:
+            self._cancel_freehand()
+        if mode != "eraser":
+            self._finish_eraser()
+        if mode not in {"hand", "check", "comment", "date_stamp", "arrow", "rectangle", "ellipse", "cloud", "freehand", "highlighter", "eraser"}:
             mode = "hand"
         self.annotation_mode = mode
         cursor = (
@@ -1378,7 +1973,12 @@ class PDFView(GraphicsView):
             if mode == "hand"
             else Qt.CursorShape.CrossCursor
         )
-        self.setCursor(cursor)
+        self.setCursor(
+            Qt.CursorShape.BlankCursor
+            if mode in {"freehand", "highlighter", "eraser"}
+            else cursor
+        )
+        self._update_pen_cursor()
 
     def _page_point_at(self, scene_point):
         for page_index, item in self._page_items.items():
@@ -1520,6 +2120,106 @@ class PDFView(GraphicsView):
         for item in self._annotation_items:
             item.setZValue(float(item.record.get("z", 20.0)))
 
+
+    def annotation_layer_records(self):
+        self._sync_annotation_records()
+        return sorted(
+            self._annotation_records,
+            key=lambda record: float(
+                record.get("z", 20.0)
+            ),
+            reverse=True,
+        )
+
+    def _annotation_item_by_id(self, annotation_id):
+        for item in self._annotation_items:
+            if str(item.record.get("id", "")) == str(annotation_id):
+                return item
+        return None
+
+    def focus_annotation_by_id(self, annotation_id):
+        item = self._annotation_item_by_id(annotation_id)
+        if item is None or not item.isVisible():
+            return False
+
+        if bool(item.record.get("locked", False)):
+            self.centerOn(item)
+            return True
+
+        self.scene.clearSelection()
+        item.setSelected(True)
+        self._active_selection_item = item
+        self.annotation_selected.emit(item)
+        self._refresh_selection_overlay()
+        self.centerOn(item)
+        return True
+
+    def set_annotation_visible(self, annotation_id, visible):
+        item = self._annotation_item_by_id(annotation_id)
+        if item is None:
+            return False
+
+        before = self._history_snapshot()
+        item.record["visible"] = bool(visible)
+        item.setVisible(bool(visible))
+
+        if not visible and item.isSelected():
+            item.setSelected(False)
+
+        self._refresh_selection_overlay()
+        self._commit_history_change(before)
+        return True
+
+    def set_annotation_locked(self, annotation_id, locked):
+        item = self._annotation_item_by_id(annotation_id)
+        if item is None:
+            return False
+
+        before = self._history_snapshot()
+        locked = bool(locked)
+        item.record["locked"] = locked
+
+        item.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
+            not locked,
+        )
+        item.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+            not locked,
+        )
+
+        if locked and item.isSelected():
+            item.setSelected(False)
+
+        self._refresh_selection_overlay()
+        self._commit_history_change(before)
+        return True
+
+    def select_annotation_by_id(self, annotation_id):
+        return self.focus_annotation_by_id(annotation_id)
+
+    def change_annotation_z_by_id(
+        self,
+        annotation_id,
+        operation,
+    ):
+        item = self._annotation_item_by_id(annotation_id)
+        if item is None:
+            return False
+
+        if bool(item.record.get("locked", False)):
+            return False
+
+        self.scene.clearSelection()
+        item.setSelected(True)
+        self._active_selection_item = item
+        changed = self.change_selected_z_order(operation)
+
+        if changed:
+            self.annotation_selected.emit(item)
+
+        return changed
+
     def change_selected_z_order(self, operation):
         selected_items = self._selected_annotation_items_sorted()
         if not selected_items:
@@ -1650,6 +2350,104 @@ class PDFView(GraphicsView):
         self._commit_history_change(before)
         return item
 
+
+    def update_selected_common_properties(
+        self,
+        color=None,
+        line_width=None,
+        fill_enabled=None,
+        fill_color=None,
+        fill_opacity=None,
+        text_color=None,
+    ):
+        items = self._selected_annotation_items_sorted()
+        if len(items) < 2:
+            return False
+
+        before = self._history_snapshot()
+        changed = False
+
+        for item in items:
+            record = getattr(item, "record", None)
+            if not record:
+                continue
+
+            record_type = str(record.get("type", ""))
+
+            if color is not None and record_type in {
+                "check",
+                "arrow",
+                "rectangle",
+                "ellipse",
+                "cloud",
+                "date_stamp",
+            "freehand",
+            }:
+                parsed = QColor(str(color))
+                if parsed.isValid():
+                    record["color"] = parsed.name(
+                        QColor.NameFormat.HexRgb
+                    )
+                    changed = True
+
+            if line_width is not None and record_type in {
+                "check",
+                "arrow",
+                "rectangle",
+                "ellipse",
+                "cloud",
+                "date_stamp",
+            "freehand",
+            }:
+                record["line_width"] = max(
+                    float(line_width),
+                    0.5,
+                )
+                changed = True
+
+            if record_type in {"rectangle", "ellipse", "cloud"}:
+                if fill_enabled is not None:
+                    record["fill_enabled"] = bool(fill_enabled)
+                    changed = True
+
+                if fill_color is not None:
+                    parsed = QColor(str(fill_color))
+                    if parsed.isValid():
+                        record["fill_color"] = parsed.name(
+                            QColor.NameFormat.HexRgb
+                        )
+                        changed = True
+
+                if fill_opacity is not None:
+                    record["fill_opacity"] = min(
+                        max(float(fill_opacity), 0.0),
+                        1.0,
+                    )
+                    changed = True
+
+            if (
+                text_color is not None
+                and record_type in {"rectangle", "cloud"}
+            ):
+                parsed = QColor(str(text_color))
+                if parsed.isValid():
+                    record["text_color"] = parsed.name(
+                        QColor.NameFormat.HexRgb
+                    )
+                    changed = True
+
+            if hasattr(item, "refresh_from_record"):
+                item.refresh_from_record()
+            else:
+                item.update()
+
+        if not changed:
+            return False
+
+        self._refresh_selection_overlay()
+        self._commit_history_change(before)
+        return True
+
     def update_arrow_properties(self, item, color=None, line_width=None):
         record = getattr(item, "record", None)
         if not record or record.get("type") != "arrow":
@@ -1770,10 +2568,23 @@ class PDFView(GraphicsView):
             item = ArrowAnnotationItem(record)
         elif record["type"] in {"rectangle", "ellipse", "cloud"}:
             item = ShapeAnnotationItem(record)
+        elif record["type"] == "freehand":
+            item = FreehandAnnotationItem(record)
         else:
             return None
         item.setPos(origin[0] + record["x"], origin[1] + record["y"])
         item.setZValue(float(record.get("z", 20.0)))
+
+        item.setVisible(bool(record.get("visible", True)))
+        locked = bool(record.get("locked", False))
+        item.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
+            not locked,
+        )
+        item.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+            not locked,
+        )
         self.scene.addItem(item)
         self._annotation_items.append(item)
         self._refresh_selection_overlay()
@@ -1807,6 +2618,7 @@ class PDFView(GraphicsView):
 
     def clear_pending_annotations(self):
         self._remove_date_stamp_preview()
+        self._cancel_freehand()
         self._remove_annotation_items()
         self._annotation_records.clear()
         self.reset_annotation_history()
@@ -1856,6 +2668,25 @@ class PDFView(GraphicsView):
             scene_point = self.mapToScene(
                 event.position().toPoint()
             )
+
+            # Freehand mode must ignore every existing annotation. Otherwise
+            # writing a character close to an earlier stroke selects or moves
+            # that stroke instead of continuing the handwriting.
+            if self.annotation_mode in {"freehand", "highlighter"}:
+                hit = self._page_point_at(scene_point)
+                if hit is not None:
+                    page_index, page_point = hit
+                    if self._start_freehand(
+                        page_index,
+                        page_point,
+                    ):
+                        event.accept()
+                        return
+
+            if self.annotation_mode == "eraser":
+                self._start_eraser(event.position().toPoint())
+                event.accept()
+                return
 
             # Selection handles always have the highest priority. Without
             # this branch, PDFView can start drawing a new circle before the
@@ -1989,6 +2820,20 @@ class PDFView(GraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        self._update_pen_cursor(event.position().toPoint())
+
+        if self._eraser_dragging:
+            self._erase_freehand_at(event.position().toPoint())
+            event.accept()
+            return
+
+        if self._freehand_drawing:
+            hit = self._page_point_at(self.mapToScene(event.position().toPoint()))
+            if hit is not None and hit[0] == self._freehand_page_index:
+                self._append_freehand_point(hit[1])
+            event.accept()
+            return
+
         if self._date_stamp_preview_item is not None:
             hit = self._page_point_at(
                 self.mapToScene(event.position().toPoint())
@@ -2039,6 +2884,16 @@ class PDFView(GraphicsView):
         self._refresh_selection_overlay()
 
     def mouseReleaseEvent(self, event):
+        if self._eraser_dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._finish_eraser()
+            event.accept()
+            return
+
+        if self._freehand_drawing and event.button() == Qt.MouseButton.LeftButton:
+            self._finish_freehand()
+            event.accept()
+            return
+
         if (
             self._date_stamp_preview_item is not None
             and event.button() == Qt.MouseButton.LeftButton
@@ -2164,18 +3019,29 @@ class PDFView(GraphicsView):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            nearby = self._annotation_item_near(event.position().toPoint())
-            if nearby is not None and nearby.record.get("type") in {"text", "date_stamp", "rectangle", "cloud", "arrow", "check"}:
-                self.scene.clearSelection()
-                nearby.setSelected(True)
+            nearby = self._annotation_item_near(
+                event.position().toPoint()
+            )
+            if nearby is not None:
+                if not nearby.isSelected():
+                    self.scene.clearSelection()
+                    nearby.setSelected(True)
+
+                self._active_selection_item = nearby
                 self.annotation_selected.emit(nearby)
                 self.annotation_edit_requested.emit(nearby)
                 event.accept()
                 return
+
         super().mouseDoubleClickEvent(event)
 
 
     def contextMenuEvent(self, event):
+        if self.annotation_mode in {"freehand", "highlighter", "eraser"}:
+            self.set_annotation_mode("hand")
+            event.accept()
+            return
+
         nearby = self._annotation_item_near(event.pos())
 
         if nearby is not None:
@@ -2352,6 +3218,8 @@ class PDFView(GraphicsView):
         if self._date_stamp_preview_item is not None:
             self._remove_date_stamp_preview()
             return True
+        if self._cancel_freehand():
+            return True
 
         if self._cancel_shape_drawing():
             return True
@@ -2367,6 +3235,10 @@ class PDFView(GraphicsView):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             if self.cancel_current_operation():
+                event.accept()
+                return
+            if self.annotation_mode in {"freehand", "highlighter", "eraser"}:
+                self.set_annotation_mode("hand")
                 event.accept()
                 return
 
@@ -2497,7 +3369,10 @@ class PDFView(GraphicsView):
 
                 item.setZValue(0.0)
 
-    def visible_page_regions(self) -> dict[int, QRectF]:
+    def visible_page_regions(
+        self,
+        prefetch_viewports=None,
+    ) -> dict[int, QRectF]:
         if not self._page_origins:
             return {}
 
@@ -2505,8 +3380,16 @@ class PDFView(GraphicsView):
             self.viewport().rect()
         ).boundingRect()
 
-        extra_x = visible_scene.width() * self.PREFETCH_VIEWPORTS
-        extra_y = visible_scene.height() * self.PREFETCH_VIEWPORTS
+        if prefetch_viewports is None:
+            prefetch = float(self.PREFETCH_VIEWPORTS)
+        else:
+            prefetch = max(
+                float(prefetch_viewports),
+                0.0,
+            )
+
+        extra_x = visible_scene.width() * prefetch
+        extra_y = visible_scene.height() * prefetch
         requested_scene = visible_scene.adjusted(
             -extra_x,
             -extra_y,
@@ -2517,7 +3400,9 @@ class PDFView(GraphicsView):
         regions = {}
         for page in self.page_manager.pages:
             page_rect = page.item.sceneBoundingRect()
-            intersection = requested_scene.intersected(page_rect)
+            intersection = requested_scene.intersected(
+                page_rect
+            )
             if intersection.isEmpty():
                 continue
 
@@ -2531,7 +3416,9 @@ class PDFView(GraphicsView):
                 intersection.width(),
                 intersection.height(),
             )
+
         return regions
+
 
     def set_single_mode(self):
         self.single_page_mode = True
@@ -2616,6 +3503,10 @@ class PDFView(GraphicsView):
         self.current_page_index = page_index
         if self.single_page_mode:
             self._show_single_page(page_index)
+
+            # _show_single_page() rebuilds the QGraphicsScene. Restore the
+            # annotation items for the newly visible page after that rebuild.
+            self._restore_annotation_items()
             self._schedule_visible_region_changed()
             return
 
