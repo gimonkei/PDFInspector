@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
-    QRadioButton,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -1304,48 +1303,18 @@ class PageThumbnailCard(QFrame):
         )
 
         self.number_label = QLabel(str(self.display_number), self)
-        self.number_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
+        self.number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.number_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-        )
-        self.page_size_label = QLabel("", self)
-        self.page_size_label.setObjectName(
-            "pageSizeBadge"
-        )
-        self.page_size_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-        self.page_size_label.setStyleSheet(
-            """
-            QLabel#pageSizeBadge {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-                border: 1px solid palette(highlight);
-                border-radius: 5px;
-                padding: 1px 6px;
-                font-weight: bold;
-            }
-            QLabel#pageSizeBadge:disabled {
-                background-color: palette(mid);
-                color: palette(window);
-                border-color: palette(mid);
-            }
-            """
-        )
-        self.page_size_label.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             True,
         )
-        self.info_layout = QHBoxLayout()
-        self.info_layout.setContentsMargins(2,0,2,0)
-        self.info_layout.setSpacing(4)
-        self.info_layout.addWidget(self.number_label)
-        self.info_layout.addStretch(1)
-        self.info_layout.addWidget(self.page_size_label)
-        self.card_layout.addWidget(self.image_label,0,Qt.AlignmentFlag.AlignHCenter)
-        self.card_layout.addLayout(self.info_layout)
+
+        self.card_layout.addWidget(
+            self.image_label,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        self.card_layout.addWidget(self.number_label)
 
         self.set_selected(False)
         self.update_display_size()
@@ -1353,21 +1322,7 @@ class PageThumbnailCard(QFrame):
     def set_thumbnail(self, pixmap):
         if pixmap is None or pixmap.isNull():
             return
-
         self._source_pixmap = QPixmap(pixmap)
-
-        label = self.page_size_label.text()
-        if label:
-            orientation = (
-                "横向き"
-                if self._source_pixmap.width()
-                > self._source_pixmap.height()
-                else "縦向き"
-            )
-            self.page_size_label.setToolTip(
-                f"{label}・{orientation}"
-            )
-
         self.update_display_size()
 
     def update_display_size(self):
@@ -1421,16 +1376,9 @@ class PageThumbnailCard(QFrame):
 
         number_height = max(
             self.number_label.sizeHint().height(),
-            self.page_size_label.sizeHint().height(),
-            22,
+            18,
         )
         self.number_label.setFixedHeight(
-            number_height
-        )
-        self.page_size_label.setMinimumHeight(
-            number_height
-        )
-        self.page_size_label.setMaximumHeight(
             number_height
         )
 
@@ -1485,28 +1433,6 @@ class PageThumbnailCard(QFrame):
         self.card_layout.invalidate()
         self.update()
 
-
-    def set_page_size_label(self, text):
-        label = str(text or "")
-        self.page_size_label.setText(label)
-
-        orientation = ""
-        if not self._source_pixmap.isNull():
-            orientation = (
-                "横向き"
-                if self._source_pixmap.width()
-                > self._source_pixmap.height()
-                else "縦向き"
-            )
-
-        tooltip = label
-        if label and orientation:
-            tooltip = f"{label}・{orientation}"
-
-        self.page_size_label.setToolTip(
-            tooltip
-        )
-        self.update_display_size()
 
     def set_selected(self, selected):
         if selected:
@@ -1564,8 +1490,6 @@ class PageThumbnailCard(QFrame):
         split_action = menu.addAction(
             "PDF全体を分割して保存..."
         )
-        menu.addSeparator()
-        resize_action = menu.addAction("ページサイズ変更...")
 
         selected_action = menu.exec(
             event.globalPos()
@@ -1587,8 +1511,7 @@ class PageThumbnailCard(QFrame):
             self.panel.main_window.extract_selected_page()
         elif selected_action is split_action:
             self.panel.main_window.split_pdf_into_pages()
-        elif selected_action is resize_action:
-            self.panel.main_window.resize_selected_page()
+
         event.accept()
 
 
@@ -1683,14 +1606,10 @@ class PageThumbnailPanel(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.scroll_area.setAcceptDrops(True)
-        self.scroll_area.viewport().setAcceptDrops(True)
         self.scroll_area.installEventFilter(self)
         self.scroll_area.viewport().installEventFilter(self)
 
         self.content_widget = QWidget()
-        self.content_widget.setAcceptDrops(True)
-        self.content_widget.installEventFilter(self)
         self.content_layout = QVBoxLayout(
             self.content_widget
         )
@@ -1793,38 +1712,21 @@ class PageThumbnailPanel(QWidget):
             int(round(self.thumbnail_base_height * self.thumbnail_scale)),
         )
 
-    def _pdf_paths_from_mime(self, mime_data):
-        if mime_data is None or not mime_data.hasUrls():
-            return []
-        paths=[]
-        for url in mime_data.urls():
-            if url.isLocalFile():
-                p=Path(url.toLocalFile())
-                if p.suffix.lower()==".pdf": paths.append(str(p))
-        return paths
-
     def eventFilter(self, watched, event):
-        event_type = event.type()
-        if event_type == event.Type.Wheel and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            delta=event.angleDelta().y()
-            if delta:
-                self.set_thumbnail_scale(self.thumbnail_scale + (0.10 if delta>0 else -0.10))
-            return True
-        if event_type in {event.Type.DragEnter,event.Type.DragMove}:
-            paths=self._pdf_paths_from_mime(event.mimeData())
-            if paths:
-                event.setDropAction(Qt.DropAction.CopyAction); event.accept()
-            else: event.ignore()
-            return True
-        if event_type == event.Type.Drop:
-            paths=self._pdf_paths_from_mime(event.mimeData())
-            if not paths: event.ignore(); return True
-            gp=watched.mapToGlobal(event.position().toPoint())
-            idx=self._target_index_from_global(gp)
-            self.main_window.add_pages_from_paths(paths,idx)
-            event.setDropAction(Qt.DropAction.CopyAction); event.accept(); return True
-        return super().eventFilter(watched,event)
+        if (
+            event.type() == event.Type.Wheel
+            and event.modifiers()
+            & Qt.KeyboardModifier.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            if delta == 0:
+                return True
 
+            step = 0.10 if delta > 0 else -0.10
+            self.set_thumbnail_scale(self.thumbnail_scale + step)
+            return True
+
+        return super().eventFilter(watched, event)
 
     def set_thumbnail_scale(self, scale):
         scale = max(
@@ -2031,9 +1933,6 @@ class PageThumbnailPanel(QWidget):
                 page_index + 1,
             )
             card.set_thumbnail(placeholder)
-            card.set_page_size_label(
-                self.main_window.document.page_size_label(page_index)
-            )
             self._cards.append(card)
             self.content_layout.addWidget(
                 card,
@@ -3274,23 +3173,6 @@ class MainWindow(QMainWindow):
         )
 
 
-    def add_pages_from_paths(self, paths, insertion_index):
-        if not self.document.has_document(): return
-        insertion_index=max(0,min(int(insertion_index),self.document.page_count))
-        paths=[str(p) for p in paths if str(p).lower().endswith('.pdf')]
-        if not paths: return
-        self.view._sync_annotation_records(); total=0
-        try:
-            for path in paths:
-                total += self.document.insert_pdf_pages(path,insertion_index+total)
-        except PDFOpenError as error:
-            QMessageBox.critical(self,'ページを追加できません',str(error)); return
-        if total<=0: return
-        for record in self.view._annotation_records:
-            pi=int(record.get('page_index',0))
-            if pi>=insertion_index: record['page_index']=pi+total
-        self._refresh_after_page_structure_change(insertion_index)
-
     def add_pages_from_pdf(self):
         if not self.document.has_document():
             QMessageBox.information(
@@ -3419,35 +3301,6 @@ class MainWindow(QMainWindow):
             )
         )
         panel.select_page(page_index)
-
-    def resize_selected_page(self):
-        page_index=self.page_thumbnail_panel.selected_page_index()
-        if page_index is None: return
-        dialog=QDialog(self); dialog.setWindowTitle('ページサイズ変更'); dialog.setModal(True)
-        form=QFormLayout(dialog)
-        size_combo=QComboBox(dialog)
-        for name in ('A0','A1','A2','A3','A4','A5','B0','B1','B2','B3','B4','B5','Letter','Legal'):
-            size_combo.addItem(name,name)
-        current=self.document.page_size_label(page_index)
-        ci=size_combo.findData(current)
-        if ci>=0: size_combo.setCurrentIndex(ci)
-        orientation=QComboBox(dialog)
-        orientation.addItem('現在の向き','current'); orientation.addItem('縦','portrait'); orientation.addItem('横','landscape')
-        scale_radio=QRadioButton('内容を拡大縮小して用紙に合わせる',dialog)
-        paper_radio=QRadioButton('用紙サイズだけ変更する',dialog); scale_radio.setChecked(True)
-        mode=QWidget(dialog); ml=QVBoxLayout(mode); ml.setContentsMargins(0,0,0,0); ml.addWidget(scale_radio); ml.addWidget(paper_radio)
-        form.addRow('用紙サイズ:',size_combo); form.addRow('向き:',orientation); form.addRow('変更方法:',mode)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel,dialog)
-        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
-        if dialog.exec()!=QDialog.DialogCode.Accepted: return
-        scroll=self.page_thumbnail_panel.scroll_area.verticalScrollBar().value()
-        try:
-            self.view._sync_annotation_records()
-            self.document.resize_page(page_index,size_combo.currentData(),orientation.currentData(),scale_content=scale_radio.isChecked())
-        except PDFSaveError as error:
-            QMessageBox.critical(self,'ページサイズを変更できません',str(error)); return
-        self._refresh_after_page_structure_change(page_index)
-        QTimer.singleShot(0,lambda value=scroll,index=page_index:self._restore_thumbnail_after_page_edit(value,index))
 
     def extract_selected_page(self):
         if not self.document.has_document():

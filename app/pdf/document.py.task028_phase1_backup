@@ -158,48 +158,111 @@ class PDFDocument:
 
 
 
-    PAGE_SIZES_MM = {
-        'A0': (841.0,1189.0),'A1':(594.0,841.0),'A2':(420.0,594.0),'A3':(297.0,420.0),'A4':(210.0,297.0),'A5':(148.0,210.0),
-        'B0':(1000.0,1414.0),'B1':(707.0,1000.0),'B2':(500.0,707.0),'B3':(353.0,500.0),'B4':(250.0,353.0),'B5':(176.0,250.0),
-        'Letter':(215.9,279.4),'Legal':(215.9,355.6),
-    }
 
-    def page_size_label(self,page_index):
-        page=self.get_page(int(page_index))
-        if page is None: return ''
-        w=float(page.rect.width)*25.4/72.0; h=float(page.rect.height)*25.4/72.0
-        s,l=min(w,h),max(w,h); best=None; err=float('inf')
-        for name,dims in self.PAGE_SIZES_MM.items():
-            e=max(abs(s-min(dims)),abs(l-max(dims)))
-            if e<err: best,err=name,e
-        return best if best and err<=4.0 else f'{round(w)}×{round(h)}'
+    def export_page(
+        self,
+        page_index,
+        output_path,
+    ):
+        if self.doc is None:
+            raise PDFSaveError(
+                "保存するPDFが開かれていません。"
+            )
 
-    def _page_size_points(self,size_name,orientation,current_rect):
-        if size_name not in self.PAGE_SIZES_MM: raise PDFSaveError('指定された用紙サイズに対応していません。')
-        w,h=self.PAGE_SIZES_MM[size_name]
-        landscape=(current_rect.width>current_rect.height) if orientation=='current' else orientation=='landscape'
-        if landscape: w,h=max(w,h),min(w,h)
-        else: w,h=min(w,h),max(w,h)
-        return w*72/25.4,h*72/25.4
+        page_index = int(page_index)
+        if (
+            page_index < 0
+            or page_index >= len(self.doc)
+        ):
+            raise PDFSaveError(
+                "指定されたページが存在しません。"
+            )
 
-    def resize_page(self,page_index,size_name,orientation='current',scale_content=True):
-        if self.doc is None: raise PDFSaveError('PDFが開かれていません。')
-        page_index=int(page_index)
-        if not 0<=page_index<len(self.doc): raise PDFSaveError('指定されたページが存在しません。')
-        source=self.doc[page_index]; tw,th=self._page_size_points(str(size_name),str(orientation),source.rect)
-        if not scale_content:
-            source.set_mediabox(fitz.Rect(0,0,tw,th)); self.structure_dirty=True; return
-        rebuilt=fitz.open()
+        output = fitz.open()
         try:
-            for i in range(len(self.doc)):
-                if i!=page_index: rebuilt.insert_pdf(self.doc,from_page=i,to_page=i); continue
-                target=rebuilt.new_page(width=tw,height=th)
-                target.show_pdf_page(fitz.Rect(0,0,tw,th),self.doc,i,keep_proportion=True,overlay=True)
-            old=self.doc; self.doc=rebuilt; rebuilt=None; old.close(); self.structure_dirty=True
+            output.insert_pdf(
+                self.doc,
+                from_page=page_index,
+                to_page=page_index,
+            )
+            output.save(
+                str(output_path),
+                garbage=4,
+                deflate=True,
+            )
         except Exception as error:
-            raise PDFSaveError('ページサイズの変更に失敗しました。') from error
+            raise PDFSaveError(
+                "1ページPDFを保存できませんでした。\n"
+                "保存先の権限や空き容量を確認してください。"
+            ) from error
         finally:
-            if rebuilt is not None: rebuilt.close()
+            output.close()
+
+    def split_to_pages(
+        self,
+        output_directory,
+        base_name,
+    ):
+        if self.doc is None:
+            raise PDFSaveError(
+                "分割するPDFが開かれていません。"
+            )
+
+        output_directory = os.path.abspath(
+            str(output_directory)
+        )
+        os.makedirs(
+            output_directory,
+            exist_ok=True,
+        )
+
+        safe_base_name = str(
+            base_name or "document"
+        ).strip() or "document"
+
+        digits = max(
+            3,
+            len(str(len(self.doc))),
+        )
+        saved_paths = []
+
+        try:
+            for page_index in range(len(self.doc)):
+                output = fitz.open()
+                try:
+                    output.insert_pdf(
+                        self.doc,
+                        from_page=page_index,
+                        to_page=page_index,
+                    )
+
+                    filename = (
+                        f"{safe_base_name}_"
+                        f"{page_index + 1:0{digits}d}.pdf"
+                    )
+                    output_path = os.path.join(
+                        output_directory,
+                        filename,
+                    )
+
+                    output.save(
+                        output_path,
+                        garbage=4,
+                        deflate=True,
+                    )
+                    saved_paths.append(
+                        output_path
+                    )
+                finally:
+                    output.close()
+
+        except Exception as error:
+            raise PDFSaveError(
+                "PDFの分割保存に失敗しました。\n"
+                "保存先の権限、空き容量、同名ファイルを確認してください。"
+            ) from error
+
+        return saved_paths
 
     def get_external_page_count(self, path):
         try:

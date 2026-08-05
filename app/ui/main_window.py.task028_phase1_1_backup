@@ -1311,32 +1311,14 @@ class PageThumbnailCard(QFrame):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
         self.page_size_label = QLabel("", self)
-        self.page_size_label.setObjectName(
-            "pageSizeBadge"
-        )
         self.page_size_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self.page_size_label.setStyleSheet(
-            """
-            QLabel#pageSizeBadge {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-                border: 1px solid palette(highlight);
-                border-radius: 5px;
-                padding: 1px 6px;
-                font-weight: bold;
-            }
-            QLabel#pageSizeBadge:disabled {
-                background-color: palette(mid);
-                color: palette(window);
-                border-color: palette(mid);
-            }
-            """
+            "font-weight: bold; color: palette(mid);"
         )
         self.page_size_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
         self.info_layout = QHBoxLayout()
         self.info_layout.setContentsMargins(2,0,2,0)
@@ -1353,21 +1335,7 @@ class PageThumbnailCard(QFrame):
     def set_thumbnail(self, pixmap):
         if pixmap is None or pixmap.isNull():
             return
-
         self._source_pixmap = QPixmap(pixmap)
-
-        label = self.page_size_label.text()
-        if label:
-            orientation = (
-                "横向き"
-                if self._source_pixmap.width()
-                > self._source_pixmap.height()
-                else "縦向き"
-            )
-            self.page_size_label.setToolTip(
-                f"{label}・{orientation}"
-            )
-
         self.update_display_size()
 
     def update_display_size(self):
@@ -1422,17 +1390,10 @@ class PageThumbnailCard(QFrame):
         number_height = max(
             self.number_label.sizeHint().height(),
             self.page_size_label.sizeHint().height(),
-            22,
+            18,
         )
-        self.number_label.setFixedHeight(
-            number_height
-        )
-        self.page_size_label.setMinimumHeight(
-            number_height
-        )
-        self.page_size_label.setMaximumHeight(
-            number_height
-        )
+        self.number_label.setFixedHeight(number_height)
+        self.page_size_label.setFixedHeight(number_height)
 
         horizontal_margin = max(
             5,
@@ -1487,25 +1448,7 @@ class PageThumbnailCard(QFrame):
 
 
     def set_page_size_label(self, text):
-        label = str(text or "")
-        self.page_size_label.setText(label)
-
-        orientation = ""
-        if not self._source_pixmap.isNull():
-            orientation = (
-                "横向き"
-                if self._source_pixmap.width()
-                > self._source_pixmap.height()
-                else "縦向き"
-            )
-
-        tooltip = label
-        if label and orientation:
-            tooltip = f"{label}・{orientation}"
-
-        self.page_size_label.setToolTip(
-            tooltip
-        )
+        self.page_size_label.setText(str(text or ""))
         self.update_display_size()
 
     def set_selected(self, selected):

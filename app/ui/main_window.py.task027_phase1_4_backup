@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
-    QRadioButton,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -1304,48 +1303,18 @@ class PageThumbnailCard(QFrame):
         )
 
         self.number_label = QLabel(str(self.display_number), self)
-        self.number_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
+        self.number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.number_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-        )
-        self.page_size_label = QLabel("", self)
-        self.page_size_label.setObjectName(
-            "pageSizeBadge"
-        )
-        self.page_size_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-        self.page_size_label.setStyleSheet(
-            """
-            QLabel#pageSizeBadge {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-                border: 1px solid palette(highlight);
-                border-radius: 5px;
-                padding: 1px 6px;
-                font-weight: bold;
-            }
-            QLabel#pageSizeBadge:disabled {
-                background-color: palette(mid);
-                color: palette(window);
-                border-color: palette(mid);
-            }
-            """
-        )
-        self.page_size_label.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             True,
         )
-        self.info_layout = QHBoxLayout()
-        self.info_layout.setContentsMargins(2,0,2,0)
-        self.info_layout.setSpacing(4)
-        self.info_layout.addWidget(self.number_label)
-        self.info_layout.addStretch(1)
-        self.info_layout.addWidget(self.page_size_label)
-        self.card_layout.addWidget(self.image_label,0,Qt.AlignmentFlag.AlignHCenter)
-        self.card_layout.addLayout(self.info_layout)
+
+        self.card_layout.addWidget(
+            self.image_label,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        self.card_layout.addWidget(self.number_label)
 
         self.set_selected(False)
         self.update_display_size()
@@ -1353,41 +1322,16 @@ class PageThumbnailCard(QFrame):
     def set_thumbnail(self, pixmap):
         if pixmap is None or pixmap.isNull():
             return
-
         self._source_pixmap = QPixmap(pixmap)
-
-        label = self.page_size_label.text()
-        if label:
-            orientation = (
-                "横向き"
-                if self._source_pixmap.width()
-                > self._source_pixmap.height()
-                else "縦向き"
-            )
-            self.page_size_label.setToolTip(
-                f"{label}・{orientation}"
-            )
-
         self.update_display_size()
 
     def update_display_size(self):
-        max_width = int(
-            self.panel.thumbnail_width
-        )
-        max_height = int(
-            self.panel.thumbnail_height
-        )
+        max_width = int(self.panel.thumbnail_width)
+        max_height = int(self.panel.thumbnail_height)
 
         if self._source_pixmap.isNull():
-            shown = QPixmap(
-                max_width,
-                max_height,
-            )
-            shown.fill(
-                self.palette().color(
-                    self.backgroundRole()
-                )
-            )
+            shown = QPixmap(max_width, max_height)
+            shown.fill(self.palette().color(self.backgroundRole()))
         else:
             shown = self._source_pixmap.scaled(
                 max_width,
@@ -1396,117 +1340,19 @@ class PageThumbnailCard(QFrame):
                 Qt.TransformationMode.SmoothTransformation,
             )
 
-        display_width = max(
-            shown.width(),
-            1,
-        )
-        display_height = max(
-            shown.height(),
-            1,
-        )
+        display_width = max(shown.width(), 1)
+        display_height = max(shown.height(), 1)
 
-        self.image_label.setMinimumSize(
-            display_width,
-            display_height,
-        )
-        self.image_label.setMaximumSize(
-            display_width,
-            display_height,
-        )
-        self.image_label.resize(
-            display_width,
-            display_height,
-        )
+        self.image_label.setFixedSize(display_width, display_height)
         self.image_label.setPixmap(shown)
 
-        number_height = max(
-            self.number_label.sizeHint().height(),
-            self.page_size_label.sizeHint().height(),
-            22,
-        )
-        self.number_label.setFixedHeight(
-            number_height
-        )
-        self.page_size_label.setMinimumHeight(
-            number_height
-        )
-        self.page_size_label.setMaximumHeight(
-            number_height
-        )
-
-        horizontal_margin = max(
-            5,
-            round(7 * self.panel.thumbnail_scale),
-        )
-        vertical_margin = max(
-            4,
-            round(7 * self.panel.thumbnail_scale),
-        )
-        spacing = max(
-            2,
-            round(4 * self.panel.thumbnail_scale),
-        )
-
-        self.card_layout.setContentsMargins(
-            horizontal_margin,
-            vertical_margin,
-            horizontal_margin,
-            max(3, vertical_margin - 2),
-        )
-        self.card_layout.setSpacing(spacing)
-
-        card_width = (
-            display_width
-            + horizontal_margin * 2
-            + 2
-        )
+        card_width = display_width + 16
         card_height = (
             display_height
-            + number_height
-            + vertical_margin
-            + max(3, vertical_margin - 2)
-            + spacing
-            + 2
+            + self.number_label.sizeHint().height()
+            + 22
         )
-
-        self.setMinimumSize(
-            card_width,
-            card_height,
-        )
-        self.setMaximumSize(
-            card_width,
-            card_height,
-        )
-        self.resize(
-            card_width,
-            card_height,
-        )
-        self.updateGeometry()
-        self.card_layout.invalidate()
-        self.update()
-
-
-    def set_page_size_label(self, text):
-        label = str(text or "")
-        self.page_size_label.setText(label)
-
-        orientation = ""
-        if not self._source_pixmap.isNull():
-            orientation = (
-                "横向き"
-                if self._source_pixmap.width()
-                > self._source_pixmap.height()
-                else "縦向き"
-            )
-
-        tooltip = label
-        if label and orientation:
-            tooltip = f"{label}・{orientation}"
-
-        self.page_size_label.setToolTip(
-            tooltip
-        )
-        self.update_display_size()
+        self.setFixedSize(card_width, card_height)
 
     def set_selected(self, selected):
         if selected:
@@ -1564,8 +1410,6 @@ class PageThumbnailCard(QFrame):
         split_action = menu.addAction(
             "PDF全体を分割して保存..."
         )
-        menu.addSeparator()
-        resize_action = menu.addAction("ページサイズ変更...")
 
         selected_action = menu.exec(
             event.globalPos()
@@ -1587,8 +1431,7 @@ class PageThumbnailCard(QFrame):
             self.panel.main_window.extract_selected_page()
         elif selected_action is split_action:
             self.panel.main_window.split_pdf_into_pages()
-        elif selected_action is resize_action:
-            self.panel.main_window.resize_selected_page()
+
         event.accept()
 
 
@@ -1683,14 +1526,10 @@ class PageThumbnailPanel(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.scroll_area.setAcceptDrops(True)
-        self.scroll_area.viewport().setAcceptDrops(True)
         self.scroll_area.installEventFilter(self)
         self.scroll_area.viewport().installEventFilter(self)
 
         self.content_widget = QWidget()
-        self.content_widget.setAcceptDrops(True)
-        self.content_widget.installEventFilter(self)
         self.content_layout = QVBoxLayout(
             self.content_widget
         )
@@ -1793,84 +1632,38 @@ class PageThumbnailPanel(QWidget):
             int(round(self.thumbnail_base_height * self.thumbnail_scale)),
         )
 
-    def _pdf_paths_from_mime(self, mime_data):
-        if mime_data is None or not mime_data.hasUrls():
-            return []
-        paths=[]
-        for url in mime_data.urls():
-            if url.isLocalFile():
-                p=Path(url.toLocalFile())
-                if p.suffix.lower()==".pdf": paths.append(str(p))
-        return paths
-
     def eventFilter(self, watched, event):
-        event_type = event.type()
-        if event_type == event.Type.Wheel and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            delta=event.angleDelta().y()
-            if delta:
-                self.set_thumbnail_scale(self.thumbnail_scale + (0.10 if delta>0 else -0.10))
-            return True
-        if event_type in {event.Type.DragEnter,event.Type.DragMove}:
-            paths=self._pdf_paths_from_mime(event.mimeData())
-            if paths:
-                event.setDropAction(Qt.DropAction.CopyAction); event.accept()
-            else: event.ignore()
-            return True
-        if event_type == event.Type.Drop:
-            paths=self._pdf_paths_from_mime(event.mimeData())
-            if not paths: event.ignore(); return True
-            gp=watched.mapToGlobal(event.position().toPoint())
-            idx=self._target_index_from_global(gp)
-            self.main_window.add_pages_from_paths(paths,idx)
-            event.setDropAction(Qt.DropAction.CopyAction); event.accept(); return True
-        return super().eventFilter(watched,event)
+        if (
+            event.type() == event.Type.Wheel
+            and event.modifiers()
+            & Qt.KeyboardModifier.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            if delta == 0:
+                return True
 
+            step = 0.10 if delta > 0 else -0.10
+            self.set_thumbnail_scale(self.thumbnail_scale + step)
+            return True
+
+        return super().eventFilter(watched, event)
 
     def set_thumbnail_scale(self, scale):
         scale = max(
             self.thumbnail_min_scale,
-            min(
-                float(scale),
-                self.thumbnail_max_scale,
-            ),
+            min(float(scale), self.thumbnail_max_scale),
         )
         scale = round(scale, 2)
 
-        if (
-            abs(
-                scale - self.thumbnail_scale
-            )
-            < 0.001
-        ):
+        if abs(scale - self.thumbnail_scale) < 0.001:
             return
-
-        scrollbar = (
-            self.scroll_area.verticalScrollBar()
-        )
-        old_maximum = max(
-            scrollbar.maximum(),
-            1,
-        )
-        old_ratio = (
-            scrollbar.value()
-            / old_maximum
-        )
-
-        selected_index = (
-            self.selected_page_index()
-        )
 
         self.thumbnail_scale = scale
 
         for card in self._cards:
             card.update_display_size()
 
-        self.content_layout.invalidate()
         self.content_widget.adjustSize()
-        self.content_widget.updateGeometry()
-        self.scroll_area.widget().adjustSize()
-        self.scroll_area.viewport().updateGeometry()
-
         self._update_panel_width()
 
         self.zoom_hint_label.setText(
@@ -1879,77 +1672,19 @@ class PageThumbnailPanel(QWidget):
         )
 
         self.thumbnail_timer.stop()
-        self._thumbnail_queue = list(
-            range(len(self._cards))
-        )
+        self._thumbnail_queue = list(range(len(self._cards)))
         self.thumbnail_timer.start(0)
 
-        QTimer.singleShot(
-            0,
-            lambda ratio=old_ratio, index=selected_index: (
-                self._restore_thumbnail_zoom_position(
-                    ratio,
-                    index,
-                )
-            ),
-        )
-
-
-
-    def _restore_thumbnail_zoom_position(
-        self,
-        scroll_ratio,
-        selected_index,
-    ):
-        scrollbar = (
-            self.scroll_area.verticalScrollBar()
-        )
-        scrollbar.setValue(
-            int(
-                round(
-                    scrollbar.maximum()
-                    * max(
-                        0.0,
-                        min(
-                            float(scroll_ratio),
-                            1.0,
-                        ),
-                    )
-                )
-            )
-        )
-
-        if (
-            selected_index is not None
-            and 0 <= selected_index < len(self._cards)
-        ):
-            selected_card = self._cards[
-                selected_index
-            ]
-            self.scroll_area.ensureWidgetVisible(
-                selected_card,
-                12,
-                20,
-            )
-
     def _update_panel_width(self):
-        largest_width = (
-            self.thumbnail_width + 44
-        )
+        largest_width = self.thumbnail_width + 52
 
         if self._cards:
             largest_width = max(
-                card.width() + 30
+                card.width() + 36
                 for card in self._cards
             )
 
-        desired_width = max(
-            108,
-            min(
-                int(largest_width),
-                420,
-            ),
-        )
+        desired_width = max(112, min(largest_width, 420))
 
         dock = getattr(
             self.main_window,
@@ -1959,36 +1694,16 @@ class PageThumbnailPanel(QWidget):
         if dock is None:
             return
 
-        dock.setMinimumWidth(104)
+        dock.setMinimumWidth(
+            max(
+                108,
+                min(desired_width, 220),
+            )
+        )
         dock.setMaximumWidth(460)
+        dock.resize(desired_width, dock.height())
 
-        # resizeDocks() adjusts the actual QMainWindow dock area. Plain
-        # QWidget.resize() could shrink the dock, but often failed to expand
-        # it again after startup.
-        self.main_window.resizeDocks(
-            [dock],
-            [desired_width],
-            Qt.Orientation.Horizontal,
-        )
-
-        dock.resize(
-            desired_width,
-            dock.height(),
-        )
-
-        QTimer.singleShot(
-            0,
-            lambda: self.main_window._position_page_thumbnail_toggle(),
-        )
-
-
-    def _release_thumbnail_dock_width(
-        self,
-        dock,
-        desired_width,
-    ):
         self.main_window._position_page_thumbnail_toggle()
-
 
     def _clear_cards(self):
         self.thumbnail_timer.stop()
@@ -2031,9 +1746,6 @@ class PageThumbnailPanel(QWidget):
                 page_index + 1,
             )
             card.set_thumbnail(placeholder)
-            card.set_page_size_label(
-                self.main_window.document.page_size_label(page_index)
-            )
             self._cards.append(card)
             self.content_layout.addWidget(
                 card,
@@ -3043,31 +2755,6 @@ class MainWindow(QMainWindow):
         button.raise_()
         button.show()
 
-
-    def eventFilter(self, watched, event):
-        if (
-            watched is getattr(
-                self,
-                "page_thumbnail_dock",
-                None,
-            )
-            and event.type()
-            in {
-                event.Type.Resize,
-                event.Type.Move,
-                event.Type.Show,
-            }
-        ):
-            QTimer.singleShot(
-                0,
-                self._position_page_thumbnail_toggle,
-            )
-
-        return super().eventFilter(
-            watched,
-            event,
-        )
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
 
@@ -3132,17 +2819,13 @@ class MainWindow(QMainWindow):
         )
         self.page_thumbnail_dock.setMinimumWidth(108)
         self.page_thumbnail_dock.setMaximumWidth(460)
-        self.page_thumbnail_dock.resize(
-            236,
-            self.height(),
-        )
-        self.page_thumbnail_dock.show()
+        self.page_thumbnail_dock.resize(236, self.height())
+        self.page_thumbnail_dock.hide()
 
         self.page_thumbnail_toggle = QToolButton(self)
-        self.page_thumbnail_toggle.setText("◀")
-        self.page_thumbnail_toggle.setToolTip("ページ一覧を隠す")
+        self.page_thumbnail_toggle.setText("▶")
+        self.page_thumbnail_toggle.setToolTip("ページ一覧を表示")
         self.page_thumbnail_toggle.setCheckable(True)
-        self.page_thumbnail_toggle.setChecked(True)
         self.page_thumbnail_toggle.setFixedWidth(24)
         self.page_thumbnail_toggle.setAutoRaise(True)
         self.page_thumbnail_toggle.toggled.connect(
@@ -3150,9 +2833,6 @@ class MainWindow(QMainWindow):
         )
         self.page_thumbnail_dock.visibilityChanged.connect(
             self._on_page_thumbnail_visibility_changed
-        )
-        self.page_thumbnail_dock.installEventFilter(
-            self
         )
 
     def toggle_page_thumbnail_panel(self, visible):
@@ -3180,46 +2860,17 @@ class MainWindow(QMainWindow):
         self._position_page_thumbnail_toggle()
 
     def _position_page_thumbnail_toggle(self):
-        button = getattr(
-            self,
-            "page_thumbnail_toggle",
-            None,
-        )
+        button = getattr(self, "page_thumbnail_toggle", None)
         if button is None:
             return
-
         margin = 2
-        dock = getattr(
-            self,
-            "page_thumbnail_dock",
-            None,
-        )
-
-        y = max(
-            self.menuBar().height() + 45,
-            int(self.height() * 0.32),
-        )
-
-        if dock is not None and dock.isVisible():
-            dock_top_left = dock.mapTo(
-                self,
-                dock.rect().topLeft(),
-            )
-            x = (
-                dock_top_left.x()
-                + dock.width()
-                + margin
-            )
-        else:
-            x = margin
-
-        button.move(
-            max(margin, int(x)),
-            int(y),
-        )
+        x = margin
+        y = max(self.menuBar().height() + 45, int(self.height() * 0.32))
+        if self.page_thumbnail_dock.isVisible():
+            x = self.page_thumbnail_dock.width() + margin
+        button.move(x, y)
         button.raise_()
         button.show()
-
 
     def _refresh_after_page_structure_change(self, target_page=0):
         self.render_pipeline.invalidate()
@@ -3273,23 +2924,6 @@ class MainWindow(QMainWindow):
             min(max(selected_row, 0), self.document.page_count - 1)
         )
 
-
-    def add_pages_from_paths(self, paths, insertion_index):
-        if not self.document.has_document(): return
-        insertion_index=max(0,min(int(insertion_index),self.document.page_count))
-        paths=[str(p) for p in paths if str(p).lower().endswith('.pdf')]
-        if not paths: return
-        self.view._sync_annotation_records(); total=0
-        try:
-            for path in paths:
-                total += self.document.insert_pdf_pages(path,insertion_index+total)
-        except PDFOpenError as error:
-            QMessageBox.critical(self,'ページを追加できません',str(error)); return
-        if total<=0: return
-        for record in self.view._annotation_records:
-            pi=int(record.get('page_index',0))
-            if pi>=insertion_index: record['page_index']=pi+total
-        self._refresh_after_page_structure_change(insertion_index)
 
     def add_pages_from_pdf(self):
         if not self.document.has_document():
@@ -3419,35 +3053,6 @@ class MainWindow(QMainWindow):
             )
         )
         panel.select_page(page_index)
-
-    def resize_selected_page(self):
-        page_index=self.page_thumbnail_panel.selected_page_index()
-        if page_index is None: return
-        dialog=QDialog(self); dialog.setWindowTitle('ページサイズ変更'); dialog.setModal(True)
-        form=QFormLayout(dialog)
-        size_combo=QComboBox(dialog)
-        for name in ('A0','A1','A2','A3','A4','A5','B0','B1','B2','B3','B4','B5','Letter','Legal'):
-            size_combo.addItem(name,name)
-        current=self.document.page_size_label(page_index)
-        ci=size_combo.findData(current)
-        if ci>=0: size_combo.setCurrentIndex(ci)
-        orientation=QComboBox(dialog)
-        orientation.addItem('現在の向き','current'); orientation.addItem('縦','portrait'); orientation.addItem('横','landscape')
-        scale_radio=QRadioButton('内容を拡大縮小して用紙に合わせる',dialog)
-        paper_radio=QRadioButton('用紙サイズだけ変更する',dialog); scale_radio.setChecked(True)
-        mode=QWidget(dialog); ml=QVBoxLayout(mode); ml.setContentsMargins(0,0,0,0); ml.addWidget(scale_radio); ml.addWidget(paper_radio)
-        form.addRow('用紙サイズ:',size_combo); form.addRow('向き:',orientation); form.addRow('変更方法:',mode)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel,dialog)
-        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
-        if dialog.exec()!=QDialog.DialogCode.Accepted: return
-        scroll=self.page_thumbnail_panel.scroll_area.verticalScrollBar().value()
-        try:
-            self.view._sync_annotation_records()
-            self.document.resize_page(page_index,size_combo.currentData(),orientation.currentData(),scale_content=scale_radio.isChecked())
-        except PDFSaveError as error:
-            QMessageBox.critical(self,'ページサイズを変更できません',str(error)); return
-        self._refresh_after_page_structure_change(page_index)
-        QTimer.singleShot(0,lambda value=scroll,index=page_index:self._restore_thumbnail_after_page_edit(value,index))
 
     def extract_selected_page(self):
         if not self.document.has_document():
@@ -3879,20 +3484,8 @@ class MainWindow(QMainWindow):
                 * 1000.0,
             )
 
-            if hasattr(
-                self,
-                "page_thumbnail_dock",
-            ):
-                self.page_thumbnail_toggle.setChecked(
-                    True
-                )
-                self.page_thumbnail_dock.show()
+            if hasattr(self, "page_thumbnail_dock") and self.page_thumbnail_dock.isVisible():
                 self.page_thumbnail_panel.rebuild()
-                self.page_thumbnail_dock.raise_()
-                QTimer.singleShot(
-                    0,
-                    self.page_thumbnail_panel._update_panel_width,
-                )
 
             self._begin_initial_render(
                 index,
