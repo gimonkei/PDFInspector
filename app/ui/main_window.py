@@ -5,8 +5,8 @@ import json
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QStandardPaths, Qt, QTimer, QSize
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDrag, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import QMimeData, QPoint, QStandardPaths, Qt, QTimer, QSize, QUrl, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QDrag, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -57,6 +57,59 @@ def _set_color_button(button, color):
     fg = "#000000" if color.lightness() > 145 else "#ffffff"
     button.setText(name.upper())
     button.setStyleSheet(f"QPushButton {{background-color: {name}; color: {fg}; padding: 5px 12px;}}")
+
+
+class TearOffTabBar(QTabBar):
+    tearOffRequested = Signal(int, QPoint)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_start_position = None
+        self._drag_start_index = -1
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_position = event.position().toPoint()
+            self._drag_start_index = self.tabAt(
+                event.position().toPoint()
+            )
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        drag_index = self._drag_start_index
+        start = self._drag_start_position
+        global_position = event.globalPosition().toPoint()
+
+        super().mouseReleaseEvent(event)
+
+        self._drag_start_position = None
+        self._drag_start_index = -1
+
+        if (
+            event.button() != Qt.MouseButton.LeftButton
+            or drag_index < 0
+            or start is None
+        ):
+            return
+
+        distance = (
+            event.position().toPoint() - start
+        ).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            return
+
+        window = self.window()
+        local_to_window = window.mapFromGlobal(
+            global_position
+        )
+
+        # Releasing beyond the main-window rectangle creates a new window.
+        if not window.rect().contains(local_to_window):
+            self.tearOffRequested.emit(
+                drag_index,
+                global_position,
+            )
+
 
 
 class LinePropertiesDialog(QDialog):
@@ -2283,6 +2336,7 @@ class PageThumbnailPanel(QWidget):
 
 
 class MainWindow(QMainWindow):
+    _detached_windows = []
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PDFInspector")
@@ -2336,7 +2390,20 @@ class MainWindow(QMainWindow):
         self.view.selection_count_changed.connect(
             self.on_selection_count_changed
         )
-        self.setCentralWidget(self.view)
+        self.central_stack = QStackedWidget(self)
+        self.home_widget = self._create_home_widget()
+        self.central_stack.addWidget(
+            self.home_widget
+        )
+        self.central_stack.addWidget(
+            self.view
+        )
+        self.setCentralWidget(
+            self.central_stack
+        )
+        self.central_stack.setCurrentWidget(
+            self.home_widget
+        )
 
         # During scrolling, completed render results are held back so tile
         # replacement cannot interrupt scrollbar and viewport movement.
@@ -2405,6 +2472,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(
             0,
             self._position_page_thumbnail_toggle,
+        )
+        QTimer.singleShot(
+            0,
+            self.show_home_screen,
         )
 
     def _get_annotation_defaults_path(self):
@@ -3121,6 +3192,501 @@ class MainWindow(QMainWindow):
         return
 
 
+
+    def _create_home_widget(self):
+        home = QWidget(self)
+        home.setObjectName("homeScreen")
+        home.setAcceptDrops(False)
+
+        outer = QVBoxLayout(home)
+        outer.setContentsMargins(28, 24, 28, 24)
+        outer.setSpacing(14)
+
+        hero = QFrame(home)
+        hero.setObjectName("homeHero")
+        hero.setMaximumWidth(980)
+        hero.setStyleSheet(
+            """
+            QFrame#homeHero {
+                background: palette(base);
+                border: 1px solid palette(mid);
+                border-radius: 16px;
+            }
+            QLabel#logoMark {
+                min-width: 76px;
+                max-width: 76px;
+                min-height: 76px;
+                max-height: 76px;
+                border-radius: 18px;
+                background: palette(highlight);
+                color: palette(highlighted-text);
+                font-size: 25px;
+                font-weight: bold;
+            }
+            QLabel#homeTitle {
+                font-size: 30px;
+                font-weight: bold;
+                color: palette(text);
+            }
+            QLabel#homeSubtitle {
+                font-size: 14px;
+                color: palette(text);
+            }
+            QFrame#homeDropCard {
+                background: palette(alternate-base);
+                border: 2px dashed palette(highlight);
+                border-radius: 11px;
+            }
+            QLabel#homeDropTitle {
+                font-size: 16px;
+                font-weight: bold;
+                color: palette(text);
+            }
+            QLabel#homeDropDescription {
+                font-size: 13px;
+                color: palette(text);
+            }
+            QPushButton#homeOpenButton {
+                min-height: 44px;
+                padding: 0 26px;
+                font-size: 15px;
+                font-weight: bold;
+                border-radius: 7px;
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
+            QFrame#homeSection {
+                background: palette(base);
+                border: 1px solid palette(mid);
+                border-radius: 11px;
+            }
+            QLabel#homeSectionTitle {
+                font-size: 16px;
+                font-weight: bold;
+                color: palette(text);
+            }
+            QListWidget#homeList {
+                border: none;
+                background: transparent;
+                color: palette(text);
+                outline: none;
+            }
+            QListWidget#homeList::item {
+                padding: 7px;
+                border-radius: 5px;
+            }
+            QListWidget#homeList::item:hover {
+                background: palette(alternate-base);
+            }
+            QListWidget#homeList::item:selected {
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
+            """
+        )
+
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(34, 28, 34, 30)
+        hero_layout.setSpacing(18)
+
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(18)
+
+        logo_mark = QLabel("PDF\n✓", hero)
+        logo_mark.setObjectName("logoMark")
+        logo_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(2)
+
+        title = QLabel("PDFInspector", hero)
+        title.setObjectName("homeTitle")
+
+        subtitle = QLabel(
+            "PDF図面の閲覧・注釈・ページ編集を、ひとつの画面で。",
+            hero,
+        )
+        subtitle.setObjectName("homeSubtitle")
+
+        brand_text.addWidget(title)
+        brand_text.addWidget(subtitle)
+        brand_text.addStretch(1)
+
+        brand_row.addWidget(logo_mark)
+        brand_row.addLayout(brand_text, 1)
+        hero_layout.addLayout(brand_row)
+
+        drop_card = QFrame(hero)
+        drop_card.setObjectName("homeDropCard")
+        drop_layout = QVBoxLayout(drop_card)
+        drop_layout.setContentsMargins(24, 20, 24, 20)
+        drop_layout.setSpacing(8)
+
+        drop_icon = QLabel("⇩  PDF", drop_card)
+        drop_icon.setObjectName("homeDropTitle")
+        drop_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        drop_title = QLabel(
+            "PDFをここへドラッグ＆ドロップ",
+            drop_card,
+        )
+        drop_title.setObjectName("homeDropTitle")
+        drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        drop_description = QLabel(
+            "複数のPDFもまとめて開けます",
+            drop_card,
+        )
+        drop_description.setObjectName("homeDropDescription")
+        drop_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        open_button = QPushButton("PDFを開く", drop_card)
+        open_button.setObjectName("homeOpenButton")
+        open_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_button.clicked.connect(self.open_pdf)
+
+        drop_layout.addWidget(drop_icon)
+        drop_layout.addWidget(drop_title)
+        drop_layout.addWidget(drop_description)
+        drop_layout.addWidget(
+            open_button,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        hero_layout.addWidget(drop_card)
+
+        lists_row = QHBoxLayout()
+        lists_row.setSpacing(14)
+
+        recent_section = QFrame(hero)
+        recent_section.setObjectName("homeSection")
+        recent_layout = QVBoxLayout(recent_section)
+        recent_layout.setContentsMargins(16, 14, 16, 14)
+        recent_layout.setSpacing(8)
+
+        recent_title = QLabel("最近使ったファイル", recent_section)
+        recent_title.setObjectName("homeSectionTitle")
+        self.home_recent_list = QListWidget(recent_section)
+        self.home_recent_list.setObjectName("homeList")
+        self.home_recent_list.setMinimumHeight(190)
+        self.home_recent_list.itemDoubleClicked.connect(
+            self._open_recent_item
+        )
+
+        recent_layout.addWidget(recent_title)
+        recent_layout.addWidget(self.home_recent_list, 1)
+
+        favorites_section = QFrame(hero)
+        favorites_section.setObjectName("homeSection")
+        favorites_layout = QVBoxLayout(favorites_section)
+        favorites_layout.setContentsMargins(16, 14, 16, 14)
+        favorites_layout.setSpacing(8)
+
+        favorites_header = QHBoxLayout()
+        favorites_title = QLabel(
+            "お気に入りフォルダ",
+            favorites_section,
+        )
+        favorites_title.setObjectName("homeSectionTitle")
+        favorite_add_button = QPushButton(
+            "＋ 登録",
+            favorites_section,
+        )
+        favorite_remove_button = QPushButton(
+            "削除",
+            favorites_section,
+        )
+        favorite_add_button.clicked.connect(
+            self.add_favorite_folder
+        )
+        favorite_remove_button.clicked.connect(
+            self.remove_selected_favorite_folder
+        )
+
+        favorites_header.addWidget(favorites_title)
+        favorites_header.addStretch(1)
+        favorites_header.addWidget(favorite_add_button)
+        favorites_header.addWidget(favorite_remove_button)
+
+        self.home_favorites_list = QListWidget(
+            favorites_section
+        )
+        self.home_favorites_list.setObjectName("homeList")
+        self.home_favorites_list.setMinimumHeight(190)
+        self.home_favorites_list.itemDoubleClicked.connect(
+            self._open_favorite_item
+        )
+
+        favorites_layout.addLayout(favorites_header)
+        favorites_layout.addWidget(
+            self.home_favorites_list,
+            1,
+        )
+
+        lists_row.addWidget(recent_section, 1)
+        lists_row.addWidget(favorites_section, 1)
+        hero_layout.addLayout(lists_row)
+
+        shortcut_label = QLabel(
+            "Ctrl＋O：PDFを開く　｜　最近使ったファイルはダブルクリック",
+            hero,
+        )
+        shortcut_label.setObjectName("homeSubtitle")
+        shortcut_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(shortcut_label)
+
+        outer.addStretch(1)
+        outer.addWidget(
+            hero,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        outer.addStretch(1)
+
+        return home
+
+
+
+    def _home_data_path(self):
+        config_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppConfigLocation
+            )
+        )
+        config_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        return config_dir / "home_data.json"
+
+    def _load_home_data(self):
+        path = self._home_data_path()
+        if not path.exists():
+            return {
+                "recent_files": [],
+                "favorite_folders": [],
+            }
+
+        try:
+            data = json.loads(
+                path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            data = {}
+
+        return {
+            "recent_files": list(
+                data.get("recent_files", [])
+            ),
+            "favorite_folders": list(
+                data.get("favorite_folders", [])
+            ),
+        }
+
+    def _save_home_data(self):
+        data = {
+            "recent_files": list(
+                getattr(self, "_recent_files", [])
+            ),
+            "favorite_folders": list(
+                getattr(self, "_favorite_folders", [])
+            ),
+        }
+        try:
+            self._home_data_path().write_text(
+                json.dumps(
+                    data,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _ensure_home_data_loaded(self):
+        if hasattr(self, "_recent_files"):
+            return
+
+        data = self._load_home_data()
+        self._recent_files = [
+            str(path)
+            for path in data["recent_files"]
+            if Path(path).exists()
+        ][:10]
+        self._favorite_folders = [
+            str(path)
+            for path in data["favorite_folders"]
+            if Path(path).is_dir()
+        ]
+
+    def _remember_recent_file(self, path):
+        self._ensure_home_data_loaded()
+        normalized = str(Path(path))
+        self._recent_files = [
+            item
+            for item in self._recent_files
+            if str(Path(item)).lower()
+            != normalized.lower()
+        ]
+        self._recent_files.insert(0, normalized)
+        self._recent_files = self._recent_files[:10]
+        self._save_home_data()
+        self._refresh_home_lists()
+
+    def _refresh_home_lists(self):
+        self._ensure_home_data_loaded()
+
+        if hasattr(self, "home_recent_list"):
+            self.home_recent_list.clear()
+            for path in self._recent_files:
+                item = QListWidgetItem(
+                    f"📄  {Path(path).name}"
+                )
+                item.setData(
+                    Qt.ItemDataRole.UserRole,
+                    path,
+                )
+                item.setToolTip(path)
+                self.home_recent_list.addItem(item)
+
+            if not self._recent_files:
+                item = QListWidgetItem(
+                    "最近使ったファイルはありません"
+                )
+                item.setFlags(
+                    item.flags()
+                    & ~Qt.ItemFlag.ItemIsEnabled
+                )
+                self.home_recent_list.addItem(item)
+
+        if hasattr(self, "home_favorites_list"):
+            self.home_favorites_list.clear()
+            for path in self._favorite_folders:
+                item = QListWidgetItem(
+                    f"📁  {Path(path).name or path}"
+                )
+                item.setData(
+                    Qt.ItemDataRole.UserRole,
+                    path,
+                )
+                item.setToolTip(path)
+                self.home_favorites_list.addItem(item)
+
+            if not self._favorite_folders:
+                item = QListWidgetItem(
+                    "「＋ 登録」からフォルダを追加できます"
+                )
+                item.setFlags(
+                    item.flags()
+                    & ~Qt.ItemFlag.ItemIsEnabled
+                )
+                self.home_favorites_list.addItem(item)
+
+    def _open_recent_item(self, item):
+        path = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if path and Path(path).is_file():
+            self.open_pdf_path(path)
+
+    def add_favorite_folder(self):
+        self._ensure_home_data_loaded()
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "お気に入りフォルダを登録",
+            "",
+        )
+        if not folder:
+            return
+
+        normalized = str(Path(folder))
+        if normalized not in self._favorite_folders:
+            self._favorite_folders.append(normalized)
+            self._save_home_data()
+        self._refresh_home_lists()
+
+    def remove_selected_favorite_folder(self):
+        if not hasattr(self, "home_favorites_list"):
+            return
+
+        item = self.home_favorites_list.currentItem()
+        if item is None:
+            return
+
+        path = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if not path:
+            return
+
+        self._favorite_folders = [
+            folder
+            for folder in self._favorite_folders
+            if folder != path
+        ]
+        self._save_home_data()
+        self._refresh_home_lists()
+
+    def _open_favorite_item(self, item):
+        path = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if path and Path(path).is_dir():
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(path)
+            )
+
+    def show_home_screen(self):
+        # MainWindow.__init__ schedules the initial home screen with
+        # QTimer.singleShot(0, ...). A detached window can receive and load
+        # its transferred session before that queued callback runs. Do not
+        # let the stale startup callback erase an already attached document.
+        if self._document_tabs:
+            return
+
+        self.render_timer.stop()
+        self.visible_tile_timer.stop()
+        self.scroll_settle_timer.stop()
+        self.render_pipeline.invalidate()
+        self.render_manager.clear()
+
+        self.view.clear_pending_annotations()
+        self.view._annotation_records = []
+        self.view.clear_pages()
+
+        self.current_page = 0
+        self.selected_date_stamp_item = None
+
+        self.central_stack.setCurrentWidget(
+            self.home_widget
+        )
+        self._refresh_home_lists()
+
+        self.document_tab_toolbar.hide()
+
+        if hasattr(self, "page_thumbnail_dock"):
+            self.page_thumbnail_dock.hide()
+            self.page_thumbnail_toggle.blockSignals(True)
+            self.page_thumbnail_toggle.setChecked(False)
+            self.page_thumbnail_toggle.setText("▶")
+            self.page_thumbnail_toggle.blockSignals(False)
+            self._position_page_thumbnail_toggle()
+
+        if hasattr(self, "annotation_layer_dock"):
+            self.annotation_layer_dock.hide()
+            self.annotation_layer_toggle.blockSignals(True)
+            self.annotation_layer_toggle.setChecked(False)
+            self.annotation_layer_toggle.blockSignals(False)
+
+        self.setWindowTitle("PDFInspector")
+        self.update_toolbar()
+
+    def show_document_workspace(self):
+        self.central_stack.setCurrentWidget(
+            self.view
+        )
+
     def create_page_thumbnail_panel(self):
         self.page_thumbnail_dock = QDockWidget("ページ一覧", self)
         self.page_thumbnail_dock.setObjectName("pageThumbnailDock")
@@ -3664,7 +4230,7 @@ class MainWindow(QMainWindow):
             self.document_tab_toolbar,
         )
 
-        self.document_tab_bar = QTabBar(self)
+        self.document_tab_bar = TearOffTabBar(self)
         self.document_tab_bar.setMovable(True)
         self.document_tab_bar.setTabsClosable(True)
         self.document_tab_bar.setExpanding(False)
@@ -3718,6 +4284,9 @@ class MainWindow(QMainWindow):
         )
         self.document_tab_bar.tabCloseRequested.connect(
             self.close_document_tab
+        )
+        self.document_tab_bar.tearOffRequested.connect(
+            self.detach_document_tab
         )
 
         self.document_tab_bar.setSizePolicy(
@@ -3828,6 +4397,7 @@ class MainWindow(QMainWindow):
             self.current_page = int(
                 session.get("page", 0)
             )
+            self.show_document_workspace()
 
             layout_started = perf_counter()
             self.show_document(
@@ -3951,9 +4521,136 @@ class MainWindow(QMainWindow):
         finally:
             self._switching_document_tab = False
 
+
+    def detach_document_tab(
+        self,
+        index,
+        global_position,
+    ):
+        index = int(index)
+        if (
+            index < 0
+            or index >= len(self._document_tabs)
+        ):
+            return
+
+        if index == self._active_document_tab:
+            self._capture_active_document_tab()
+
+        session = deepcopy(
+            self._document_tabs[index]
+        )
+        tab_text = self.document_tab_bar.tabText(
+            index
+        )
+
+        self._switching_document_tab = True
+        try:
+            self.document_tab_bar.removeTab(index)
+            self._document_tabs.pop(index)
+        finally:
+            self._switching_document_tab = False
+
+        detached = MainWindow()
+        detached.setAttribute(
+            Qt.WidgetAttribute.WA_DeleteOnClose,
+            True,
+        )
+        detached._accept_detached_session(
+            session,
+            tab_text,
+        )
+
+        size = self.size()
+        detached.resize(
+            max(size.width(), 900),
+            max(size.height(), 650),
+        )
+        detached.move(
+            global_position.x() - 80,
+            global_position.y() - 24,
+        )
+        detached.show()
+        detached.raise_()
+        detached.activateWindow()
+
+        MainWindow._detached_windows.append(
+            detached
+        )
+        detached.destroyed.connect(
+            lambda *_args, window=detached: (
+                MainWindow._remove_detached_window(
+                    window
+                )
+            )
+        )
+
+        if not self._document_tabs:
+            self._active_document_tab = -1
+            self.document.close()
+            self.show_home_screen()
+            return
+
+        next_index = min(
+            index,
+            len(self._document_tabs) - 1,
+        )
+        self._active_document_tab = -1
+        self.document_tab_bar.setCurrentIndex(
+            next_index
+        )
+        self.on_document_tab_changed(
+            next_index
+        )
+
+    @classmethod
+    def _remove_detached_window(
+        cls,
+        window,
+    ):
+        try:
+            cls._detached_windows.remove(window)
+        except ValueError:
+            pass
+
+    def _accept_detached_session(
+        self,
+        session,
+        tab_text=None,
+    ):
+        self._document_tabs = [
+            deepcopy(session)
+        ]
+
+        self._switching_document_tab = True
+        try:
+            while self.document_tab_bar.count():
+                self.document_tab_bar.removeTab(0)
+            index = self.document_tab_bar.addTab(
+                tab_text
+                or Path(session["path"]).name
+            )
+            self.document_tab_bar.setTabToolTip(
+                index,
+                session["path"],
+            )
+            self.document_tab_bar.setCurrentIndex(
+                index
+            )
+        finally:
+            self._switching_document_tab = False
+
+        self._active_document_tab = -1
+        if self._load_document_session(0):
+            self._active_document_tab = 0
+            self.document_tab_toolbar.show()
+
     def close_document_tab(self, index):
         index = int(index)
-        if index < 0 or index >= len(self._document_tabs):
+        if (
+            index < 0
+            or index >= len(self._document_tabs)
+        ):
             return
 
         if index == self._active_document_tab:
@@ -3967,12 +4664,7 @@ class MainWindow(QMainWindow):
             if not self._document_tabs:
                 self._active_document_tab = -1
                 self.document.close()
-                self.view.clear_pending_annotations()
-                self.render_pipeline.invalidate()
-                self.render_manager.clear()
-                self.setWindowTitle("PDFInspector")
-                self.document_tab_toolbar.hide()
-                self.update_toolbar()
+                self.show_home_screen()
                 return
 
             next_index = min(
@@ -3989,6 +4681,7 @@ class MainWindow(QMainWindow):
         self.on_document_tab_changed(
             self.document_tab_bar.currentIndex()
         )
+
 
     def close_all_document_tabs(self):
         self._capture_active_document_tab()
@@ -4997,6 +5690,7 @@ class MainWindow(QMainWindow):
 
         self._active_document_tab = index
         self.document_tab_toolbar.show()
+        self._remember_recent_file(path)
         return True
 
 
