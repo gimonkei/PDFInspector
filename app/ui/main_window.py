@@ -3,10 +3,11 @@ from datetime import date
 from time import perf_counter
 import json
 import uuid
+import fitz
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QPoint, QStandardPaths, Qt, QTimer, QSize, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QDrag, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QPointF, QRectF, QStandardPaths, Qt, QTimer, QSize, QUrl, Signal
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QDrag, QFont, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -50,6 +51,9 @@ from app.pdf.render_pipeline import RenderPipeline
 from app.pdf.render_manager import RenderManager
 from app.pdf.renderer import PDFRenderer
 from app.viewer.pdf_view import PDFView
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+from app.application.window_registry import WindowRegistry
+from app.ui.tearoff_tab_bar import TearOffTabBar
 
 
 def _set_color_button(button, color):
@@ -59,57 +63,142 @@ def _set_color_button(button, color):
     button.setStyleSheet(f"QPushButton {{background-color: {name}; color: {fg}; padding: 5px 12px;}}")
 
 
-class TearOffTabBar(QTabBar):
-    tearOffRequested = Signal(int, QPoint)
-
-    def __init__(self, parent=None):
+class PrintOptionsDialog(QDialog):
+    def __init__(
+        self,
+        parent,
+        page_count,
+        current_page,
+    ):
         super().__init__(parent)
-        self._drag_start_position = None
-        self._drag_start_index = -1
+        self.setWindowTitle("印刷設定")
+        self.setModal(True)
+        self.setMinimumWidth(430)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_position = event.position().toPoint()
-            self._drag_start_index = self.tabAt(
-                event.position().toPoint()
-            )
-        super().mousePressEvent(event)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
 
-    def mouseReleaseEvent(self, event):
-        drag_index = self._drag_start_index
-        start = self._drag_start_position
-        global_position = event.globalPosition().toPoint()
-
-        super().mouseReleaseEvent(event)
-
-        self._drag_start_position = None
-        self._drag_start_index = -1
-
-        if (
-            event.button() != Qt.MouseButton.LeftButton
-            or drag_index < 0
-            or start is None
-        ):
-            return
-
-        distance = (
-            event.position().toPoint() - start
-        ).manhattanLength()
-        if distance < QApplication.startDragDistance():
-            return
-
-        window = self.window()
-        local_to_window = window.mapFromGlobal(
-            global_position
+        self.range_combo = QComboBox(self)
+        self.range_combo.addItem(
+            "すべてのページ",
+            "all",
+        )
+        self.range_combo.addItem(
+            "現在のページ",
+            "current",
+        )
+        self.range_combo.addItem(
+            "ページ指定",
+            "custom",
+        )
+        form.addRow(
+            "印刷範囲:",
+            self.range_combo,
         )
 
-        # Releasing beyond the main-window rectangle creates a new window.
-        if not window.rect().contains(local_to_window):
-            self.tearOffRequested.emit(
-                drag_index,
-                global_position,
-            )
+        self.range_edit = QLineEdit(self)
+        self.range_edit.setPlaceholderText(
+            "例: 1,3,5-8"
+        )
+        self.range_edit.setEnabled(False)
+        form.addRow(
+            "ページ:",
+            self.range_edit,
+        )
 
+        self.range_combo.currentIndexChanged.connect(
+            lambda *_: self.range_edit.setEnabled(
+                self.range_combo.currentData()
+                == "custom"
+            )
+        )
+
+        self.scale_combo = QComboBox(self)
+        self.scale_combo.addItem(
+            "用紙に合わせる",
+            "fit",
+        )
+        self.scale_combo.addItem(
+            "実際のサイズ（100%）",
+            "actual",
+        )
+        self.scale_combo.addItem(
+            "指定倍率",
+            "custom",
+        )
+        form.addRow(
+            "拡大縮小:",
+            self.scale_combo,
+        )
+
+        self.scale_spin = QSpinBox(self)
+        self.scale_spin.setRange(10, 400)
+        self.scale_spin.setValue(100)
+        self.scale_spin.setSuffix("%")
+        self.scale_spin.setEnabled(False)
+        form.addRow(
+            "倍率:",
+            self.scale_spin,
+        )
+
+        self.scale_combo.currentIndexChanged.connect(
+            lambda *_: self.scale_spin.setEnabled(
+                self.scale_combo.currentData()
+                == "custom"
+            )
+        )
+
+        self.print_annotations_check = QCheckBox(
+            "PDFInspectorの注釈も印刷する",
+            self,
+        )
+        self.print_annotations_check.setChecked(
+            True
+        )
+        form.addRow(
+            "",
+            self.print_annotations_check,
+        )
+
+        self.center_check = QCheckBox(
+            "用紙の中央に配置",
+            self,
+        )
+        self.center_check.setChecked(True)
+        form.addRow("", self.center_check)
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            (
+                f"全{page_count}ページ／"
+                f"現在は{current_page + 1}ページ目"
+            ),
+            self,
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        return {
+            "range_mode": self.range_combo.currentData(),
+            "range_text": self.range_edit.text().strip(),
+            "scale_mode": self.scale_combo.currentData(),
+            "scale_percent": self.scale_spin.value(),
+            "print_annotations": (
+                self.print_annotations_check.isChecked()
+            ),
+            "center": self.center_check.isChecked(),
+        }
 
 
 class LinePropertiesDialog(QDialog):
@@ -2339,9 +2428,23 @@ class MainWindow(QMainWindow):
     _detached_windows = []
     def __init__(self):
         super().__init__()
+
+        self.window_id = WindowRegistry.register(self)
+        self.destroyed.connect(
+            lambda *_args, window_id=self.window_id: (
+                WindowRegistry.unregister(window_id)
+            )
+        )
         self.setWindowTitle("PDFInspector")
         self.resize(1200, 800)
         self.setAcceptDrops(True)
+
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
+            | QMainWindow.DockOption.GroupedDragging
+        )
 
         self.document = PDFDocument()
         self.renderer = PDFRenderer()
@@ -2465,6 +2568,11 @@ class MainWindow(QMainWindow):
         self.create_date_stamp_panel()
         self.create_annotation_properties_panel()
         self.create_annotation_layer_panel()
+        self.create_layout_menu()
+        QTimer.singleShot(
+            0,
+            self.restore_workspace_layout,
+        )
         QTimer.singleShot(
             0,
             self._position_annotation_layer_toggle,
@@ -2861,6 +2969,17 @@ class MainWindow(QMainWindow):
         )
         toolbar.addWidget(spacer)
 
+        print_action = QAction("🖨 印刷", self)
+        print_action.setToolTip("印刷 (Ctrl+P)")
+        print_action.setShortcut(
+            QKeySequence.StandardKey.Print
+        )
+        print_action.triggered.connect(
+            self.print_document
+        )
+        toolbar.addAction(print_action)
+        toolbar.addSeparator()
+
         save_action = QAction("💾 保存", self)
         save_action.setToolTip("保存 (Ctrl+S)")
         save_action.setShortcut("Ctrl+S")
@@ -2954,6 +3073,14 @@ class MainWindow(QMainWindow):
         )
         self.annotation_layer_dock.setObjectName(
             "annotationLayerDock"
+        )
+        self.annotation_layer_dock.setAllowedAreas(
+            Qt.DockWidgetArea.AllDockWidgetAreas
+        )
+        self.annotation_layer_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
 
         self.annotation_layer_panel = (
@@ -3192,6 +3319,231 @@ class MainWindow(QMainWindow):
         return
 
 
+
+
+    def _workspace_layout_path(self):
+        config_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppConfigLocation
+            )
+        )
+        config_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        return config_dir / "workspace_layout.json"
+
+    def create_layout_menu(self):
+        view_menu = self.menuBar().addMenu(
+            "表示"
+        )
+
+        self.page_thumbnail_view_action = (
+            self.page_thumbnail_dock.toggleViewAction()
+        )
+        self.page_thumbnail_view_action.setText(
+            "ページ一覧"
+        )
+
+        self.annotation_layer_view_action = (
+            self.annotation_layer_dock.toggleViewAction()
+        )
+        self.annotation_layer_view_action.setText(
+            "注釈・プロパティ"
+        )
+
+        view_menu.addAction(
+            self.page_thumbnail_view_action
+        )
+        view_menu.addAction(
+            self.annotation_layer_view_action
+        )
+        view_menu.addSeparator()
+
+        save_layout_action = QAction(
+            "現在のレイアウトを保存",
+            self,
+        )
+        save_layout_action.triggered.connect(
+            self.save_workspace_layout
+        )
+        view_menu.addAction(save_layout_action)
+
+        restore_layout_action = QAction(
+            "保存したレイアウトを復元",
+            self,
+        )
+        restore_layout_action.triggered.connect(
+            self.restore_workspace_layout
+        )
+        view_menu.addAction(restore_layout_action)
+
+        reset_layout_action = QAction(
+            "標準レイアウトに戻す",
+            self,
+        )
+        reset_layout_action.triggered.connect(
+            self.reset_workspace_layout
+        )
+        view_menu.addAction(reset_layout_action)
+
+    def save_workspace_layout(self):
+        data = {
+            "geometry": bytes(
+                self.saveGeometry().toBase64()
+            ).decode("ascii"),
+            "state": bytes(
+                self.saveState(1).toBase64()
+            ).decode("ascii"),
+            "annotation_splitter": (
+                self.annotation_side_splitter.sizes()
+                if hasattr(
+                    self,
+                    "annotation_side_splitter",
+                )
+                else []
+            ),
+        }
+
+        try:
+            self._workspace_layout_path().write_text(
+                json.dumps(
+                    data,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "レイアウト保存",
+                f"レイアウトを保存できませんでした。\n{error}",
+            )
+
+    def restore_workspace_layout(self):
+        path = self._workspace_layout_path()
+        if not path.exists():
+            return False
+
+        try:
+            data = json.loads(
+                path.read_text(encoding="utf-8")
+            )
+            geometry = QByteArray.fromBase64(
+                str(
+                    data.get("geometry", "")
+                ).encode("ascii")
+            )
+            state = QByteArray.fromBase64(
+                str(
+                    data.get("state", "")
+                ).encode("ascii")
+            )
+
+            if not geometry.isEmpty():
+                self.restoreGeometry(geometry)
+            if not state.isEmpty():
+                self.restoreState(state, 1)
+
+            splitter_sizes = data.get(
+                "annotation_splitter",
+                [],
+            )
+            if (
+                splitter_sizes
+                and hasattr(
+                    self,
+                    "annotation_side_splitter",
+                )
+            ):
+                self.annotation_side_splitter.setSizes(
+                    [
+                        max(1, int(value))
+                        for value in splitter_sizes
+                    ]
+                )
+
+            QTimer.singleShot(
+                0,
+                self._position_page_thumbnail_toggle,
+            )
+            QTimer.singleShot(
+                0,
+                self._position_annotation_layer_toggle,
+            )
+            return True
+
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            UnicodeEncodeError,
+        ):
+            return False
+
+    def reset_workspace_layout(self):
+        self.page_thumbnail_dock.setFloating(
+            False
+        )
+        self.annotation_layer_dock.setFloating(
+            False
+        )
+
+        self.removeDockWidget(
+            self.page_thumbnail_dock
+        )
+        self.removeDockWidget(
+            self.annotation_layer_dock
+        )
+
+        self.addDockWidget(
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            self.page_thumbnail_dock,
+        )
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.annotation_layer_dock,
+        )
+
+        self.resizeDocks(
+            [
+                self.page_thumbnail_dock,
+                self.annotation_layer_dock,
+            ],
+            [236, 380],
+            Qt.Orientation.Horizontal,
+        )
+
+        if self.document.has_document():
+            self.page_thumbnail_dock.show()
+            self.annotation_layer_dock.hide()
+        else:
+            self.page_thumbnail_dock.hide()
+            self.annotation_layer_dock.hide()
+
+        if hasattr(
+            self,
+            "annotation_side_splitter",
+        ):
+            self.annotation_side_splitter.setSizes(
+                [420, 300]
+            )
+
+        QTimer.singleShot(
+            0,
+            self._position_page_thumbnail_toggle,
+        )
+        QTimer.singleShot(
+            0,
+            self._position_annotation_layer_toggle,
+        )
+
+    def _save_layout_silently(self):
+        try:
+            self.save_workspace_layout()
+        except RuntimeError:
+            pass
 
     def _create_home_widget(self):
         home = QWidget(self)
@@ -3690,6 +4042,14 @@ class MainWindow(QMainWindow):
     def create_page_thumbnail_panel(self):
         self.page_thumbnail_dock = QDockWidget("ページ一覧", self)
         self.page_thumbnail_dock.setObjectName("pageThumbnailDock")
+        self.page_thumbnail_dock.setAllowedAreas(
+            Qt.DockWidgetArea.AllDockWidgetAreas
+        )
+        self.page_thumbnail_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
         self.page_thumbnail_panel = PageThumbnailPanel(self)
         self.page_thumbnail_dock.setWidget(self.page_thumbnail_panel)
         self.addDockWidget(
@@ -4230,7 +4590,10 @@ class MainWindow(QMainWindow):
             self.document_tab_toolbar,
         )
 
-        self.document_tab_bar = TearOffTabBar(self)
+        self.document_tab_bar = TearOffTabBar(
+            self.window_id,
+            self,
+        )
         self.document_tab_bar.setMovable(True)
         self.document_tab_bar.setTabsClosable(True)
         self.document_tab_bar.setExpanding(False)
@@ -4287,6 +4650,9 @@ class MainWindow(QMainWindow):
         )
         self.document_tab_bar.tearOffRequested.connect(
             self.detach_document_tab
+        )
+        self.document_tab_bar.tabTransferRequested.connect(
+            self.move_document_tab
         )
 
         self.document_tab_bar.setSizePolicy(
@@ -4527,12 +4893,47 @@ class MainWindow(QMainWindow):
         index,
         global_position,
     ):
+        transfer = self._take_document_tab(
+            int(index)
+        )
+        if transfer is None:
+            return
+
+        session, tab_text = transfer
+
+        detached = MainWindow()
+        detached.setAttribute(
+            Qt.WidgetAttribute.WA_DeleteOnClose,
+            True,
+        )
+        detached._insert_transferred_tab(
+            session,
+            tab_text,
+            0,
+        )
+
+        size = self.size()
+        detached.resize(
+            max(size.width(), 900),
+            max(size.height(), 650),
+        )
+        detached.move(
+            global_position.x() - 80,
+            global_position.y() - 24,
+        )
+        detached.show()
+        detached.raise_()
+        detached.activateWindow()
+
+
+
+    def _take_document_tab(self, index):
         index = int(index)
         if (
             index < 0
             or index >= len(self._document_tabs)
         ):
-            return
+            return None
 
         if index == self._active_document_tab:
             self._capture_active_document_tab()
@@ -4551,45 +4952,21 @@ class MainWindow(QMainWindow):
         finally:
             self._switching_document_tab = False
 
-        detached = MainWindow()
-        detached.setAttribute(
-            Qt.WidgetAttribute.WA_DeleteOnClose,
-            True,
-        )
-        detached._accept_detached_session(
-            session,
-            tab_text,
-        )
-
-        size = self.size()
-        detached.resize(
-            max(size.width(), 900),
-            max(size.height(), 650),
-        )
-        detached.move(
-            global_position.x() - 80,
-            global_position.y() - 24,
-        )
-        detached.show()
-        detached.raise_()
-        detached.activateWindow()
-
-        MainWindow._detached_windows.append(
-            detached
-        )
-        detached.destroyed.connect(
-            lambda *_args, window=detached: (
-                MainWindow._remove_detached_window(
-                    window
-                )
-            )
-        )
-
         if not self._document_tabs:
             self._active_document_tab = -1
             self.document.close()
-            self.show_home_screen()
-            return
+
+            # A transfer is different from closing the final tab with its
+            # close button. Once the last document has moved elsewhere, this
+            # source window is no longer useful and should disappear.
+            #
+            # Defer close() until the transfer signal has returned so the
+            # destination window can finish accepting the session safely.
+            QTimer.singleShot(
+                0,
+                self._close_if_empty_after_transfer,
+            )
+            return session, tab_text
 
         next_index = min(
             index,
@@ -4602,33 +4979,45 @@ class MainWindow(QMainWindow):
         self.on_document_tab_changed(
             next_index
         )
+        return session, tab_text
 
-    @classmethod
-    def _remove_detached_window(
-        cls,
-        window,
-    ):
-        try:
-            cls._detached_windows.remove(window)
-        except ValueError:
-            pass
+    def _close_if_empty_after_transfer(self):
+        if self._document_tabs:
+            return
 
-    def _accept_detached_session(
+        self.close()
+
+    def _insert_transferred_tab(
         self,
         session,
-        tab_text=None,
+        tab_text,
+        target_index=None,
     ):
-        self._document_tabs = [
-            deepcopy(session)
-        ]
+        if target_index is None:
+            target_index = len(
+                self._document_tabs
+            )
+
+        target_index = max(
+            0,
+            min(
+                int(target_index),
+                len(self._document_tabs),
+            ),
+        )
+
+        self._capture_active_document_tab()
 
         self._switching_document_tab = True
         try:
-            while self.document_tab_bar.count():
-                self.document_tab_bar.removeTab(0)
-            index = self.document_tab_bar.addTab(
+            self._document_tabs.insert(
+                target_index,
+                deepcopy(session),
+            )
+            index = self.document_tab_bar.insertTab(
+                target_index,
                 tab_text
-                or Path(session["path"]).name
+                or Path(session["path"]).name,
             )
             self.document_tab_bar.setTabToolTip(
                 index,
@@ -4641,9 +5030,111 @@ class MainWindow(QMainWindow):
             self._switching_document_tab = False
 
         self._active_document_tab = -1
-        if self._load_document_session(0):
-            self._active_document_tab = 0
+        if self._load_document_session(
+            target_index
+        ):
+            self._active_document_tab = target_index
             self.document_tab_toolbar.show()
+
+    def move_document_tab(
+        self,
+        source_window_id,
+        source_index,
+        target_index,
+    ):
+        source = WindowRegistry.get(
+            str(source_window_id)
+        )
+        if source is None:
+            return
+
+        source_index = int(source_index)
+        target_index = int(target_index)
+
+        if source is self:
+            self._move_tab_within_window(
+                source_index,
+                target_index,
+            )
+            return
+
+        transfer = source._take_document_tab(
+            source_index
+        )
+        if transfer is None:
+            return
+
+        session, tab_text = transfer
+        self._insert_transferred_tab(
+            session,
+            tab_text,
+            target_index,
+        )
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _move_tab_within_window(
+        self,
+        source_index,
+        target_index,
+    ):
+        count = len(self._document_tabs)
+        if (
+            source_index < 0
+            or source_index >= count
+        ):
+            return
+
+        target_index = max(
+            0,
+            min(target_index, count),
+        )
+        if source_index < target_index:
+            target_index -= 1
+        if source_index == target_index:
+            return
+
+        if source_index == self._active_document_tab:
+            self._capture_active_document_tab()
+
+        session = self._document_tabs.pop(
+            source_index
+        )
+        tab_text = self.document_tab_bar.tabText(
+            source_index
+        )
+        tooltip = self.document_tab_bar.tabToolTip(
+            source_index
+        )
+
+        self._switching_document_tab = True
+        try:
+            self.document_tab_bar.removeTab(
+                source_index
+            )
+            self._document_tabs.insert(
+                target_index,
+                session,
+            )
+            new_index = self.document_tab_bar.insertTab(
+                target_index,
+                tab_text,
+            )
+            self.document_tab_bar.setTabToolTip(
+                new_index,
+                tooltip,
+            )
+            self.document_tab_bar.setCurrentIndex(
+                new_index
+            )
+        finally:
+            self._switching_document_tab = False
+
+        self._active_document_tab = -1
+        self.on_document_tab_changed(
+            target_index
+        )
 
     def close_document_tab(self, index):
         index = int(index)
@@ -5858,6 +6349,678 @@ class MainWindow(QMainWindow):
                 "表示できるPDFページがありません。",
             )
 
+
+    def _parse_print_page_range(
+        self,
+        text,
+        page_count,
+    ):
+        pages = set()
+        value = str(text or "").strip()
+        if not value:
+            raise ValueError(
+                "ページ範囲を入力してください。"
+            )
+
+        for token in value.split(","):
+            token = token.strip()
+            if not token:
+                continue
+
+            if "-" in token:
+                start_text, end_text = token.split(
+                    "-",
+                    1,
+                )
+                start = int(start_text)
+                end = int(end_text)
+                if start > end:
+                    start, end = end, start
+                for page_number in range(
+                    start,
+                    end + 1,
+                ):
+                    pages.add(page_number - 1)
+            else:
+                pages.add(int(token) - 1)
+
+        invalid = [
+            page_index
+            for page_index in pages
+            if (
+                page_index < 0
+                or page_index >= page_count
+            )
+        ]
+        if invalid:
+            raise ValueError(
+                "存在しないページが指定されています。"
+            )
+
+        return sorted(pages)
+
+    def print_document(self):
+        if not self.document.has_document():
+            QMessageBox.information(
+                self,
+                "印刷",
+                "印刷するPDFを開いてください。",
+            )
+            return
+
+        options_dialog = PrintOptionsDialog(
+            self,
+            self.document.page_count,
+            self.current_page,
+        )
+        if (
+            options_dialog.exec()
+            != QDialog.DialogCode.Accepted
+        ):
+            return
+
+        options = options_dialog.values()
+
+        try:
+            if options["range_mode"] == "all":
+                page_indexes = list(
+                    range(self.document.page_count)
+                )
+            elif options["range_mode"] == "current":
+                page_indexes = [
+                    int(self.current_page)
+                ]
+            else:
+                page_indexes = (
+                    self._parse_print_page_range(
+                        options["range_text"],
+                        self.document.page_count,
+                    )
+                )
+        except (
+            TypeError,
+            ValueError,
+        ) as error:
+            QMessageBox.warning(
+                self,
+                "ページ範囲",
+                str(error),
+            )
+            return
+
+        if not page_indexes:
+            return
+
+        printer = QPrinter(
+            QPrinter.PrinterMode.HighResolution
+        )
+        printer.setDocName(
+            Path(
+                self.document.path
+                or "PDFInspector"
+            ).name
+        )
+        printer.setFromTo(
+            1,
+            self.document.page_count,
+        )
+        printer.setCopyCount(1)
+
+        system_dialog = QPrintDialog(
+            printer,
+            self,
+        )
+        system_dialog.setWindowTitle(
+            "プリンターを選択"
+        )
+
+        if (
+            system_dialog.exec()
+            != QDialog.DialogCode.Accepted
+        ):
+            return
+
+        self._capture_active_document_tab()
+        self.view._sync_annotation_records()
+
+        QApplication.setOverrideCursor(
+            Qt.CursorShape.WaitCursor
+        )
+        try:
+            self._print_pages(
+                printer,
+                page_indexes,
+                options,
+            )
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "印刷エラー",
+                (
+                    "印刷処理に失敗しました。\n"
+                    f"{error}"
+                ),
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _print_pages(
+        self,
+        printer,
+        page_indexes,
+        options,
+    ):
+        painter = QPainter()
+        if not painter.begin(printer):
+            raise RuntimeError(
+                "プリンターを開始できませんでした。"
+            )
+
+        try:
+            printer_resolution = max(
+                int(printer.resolution()),
+                72,
+            )
+            render_dpi = min(
+                max(printer_resolution, 150),
+                300,
+            )
+
+            for sequence, page_index in enumerate(
+                page_indexes
+            ):
+                if sequence > 0:
+                    if not printer.newPage():
+                        raise RuntimeError(
+                            "次の印刷ページを作成できませんでした。"
+                        )
+
+                image = self._render_print_page_image(
+                    page_index,
+                    render_dpi,
+                    bool(
+                        options["print_annotations"]
+                    ),
+                )
+
+                paint_rect = printer.pageRect(
+                    QPrinter.Unit.DevicePixel
+                )
+                source_rect = QRectF(
+                    0,
+                    0,
+                    image.width(),
+                    image.height(),
+                )
+
+                if options["scale_mode"] == "fit":
+                    scale = min(
+                        paint_rect.width()
+                        / image.width(),
+                        paint_rect.height()
+                        / image.height(),
+                    )
+                elif options["scale_mode"] == "actual":
+                    scale = (
+                        printer_resolution
+                        / render_dpi
+                    )
+                else:
+                    scale = (
+                        printer_resolution
+                        / render_dpi
+                        * (
+                            float(
+                                options["scale_percent"]
+                            )
+                            / 100.0
+                        )
+                    )
+
+                target_width = (
+                    image.width() * scale
+                )
+                target_height = (
+                    image.height() * scale
+                )
+
+                if options["center"]:
+                    target_x = (
+                        paint_rect.left()
+                        + (
+                            paint_rect.width()
+                            - target_width
+                        )
+                        / 2.0
+                    )
+                    target_y = (
+                        paint_rect.top()
+                        + (
+                            paint_rect.height()
+                            - target_height
+                        )
+                        / 2.0
+                    )
+                else:
+                    target_x = paint_rect.left()
+                    target_y = paint_rect.top()
+
+                target_rect = QRectF(
+                    target_x,
+                    target_y,
+                    target_width,
+                    target_height,
+                )
+
+                painter.drawImage(
+                    target_rect,
+                    image,
+                    source_rect,
+                )
+        finally:
+            painter.end()
+
+    def _render_print_page_image(
+        self,
+        page_index,
+        dpi,
+        print_annotations,
+    ):
+        page = self.document.doc[
+            int(page_index)
+        ]
+        zoom = float(dpi) / 72.0
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(
+                zoom,
+                zoom,
+            ),
+            alpha=False,
+        )
+
+        image_format = (
+            QImage.Format.Format_RGB888
+            if pixmap.n == 3
+            else QImage.Format.Format_RGBA8888
+        )
+        image = QImage(
+            pixmap.samples,
+            pixmap.width,
+            pixmap.height,
+            pixmap.stride,
+            image_format,
+        ).copy()
+
+        if print_annotations:
+            self._paint_annotations_on_image(
+                image,
+                int(page_index),
+                zoom,
+            )
+
+        return image
+
+    def _paint_annotations_on_image(
+        self,
+        image,
+        page_index,
+        scale,
+    ):
+        painter = QPainter(image)
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing,
+            True,
+        )
+
+        try:
+            for record in self.view._annotation_records:
+                if (
+                    int(
+                        record.get(
+                            "page_index",
+                            -1,
+                        )
+                    )
+                    != page_index
+                ):
+                    continue
+
+                self._paint_annotation_record(
+                    painter,
+                    record,
+                    scale,
+                )
+        finally:
+            painter.end()
+
+    def _paint_annotation_record(
+        self,
+        painter,
+        record,
+        scale,
+    ):
+        record_type = str(
+            record.get("type", "")
+        )
+        x = float(record.get("x", 0.0)) * scale
+        y = float(record.get("y", 0.0)) * scale
+        color = QColor(
+            str(record.get("color", "#dc0000"))
+        )
+        if not color.isValid():
+            color = QColor("#dc0000")
+
+        opacity = float(
+            record.get("opacity", 1.0)
+        )
+        color.setAlphaF(
+            max(0.0, min(opacity, 1.0))
+        )
+
+        line_width = max(
+            float(record.get("line_width", 2.0))
+            * scale,
+            1.0,
+        )
+        painter.setPen(
+            QPen(
+                color,
+                line_width,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.setBrush(
+            Qt.BrushStyle.NoBrush
+        )
+
+        if record_type == "check":
+            size = float(
+                record.get("size", 15.0)
+            ) * scale
+            path = QPolygonF(
+                [
+                    QPointF(
+                        x - size * 0.42,
+                        y,
+                    ),
+                    QPointF(
+                        x - size * 0.10,
+                        y + size * 0.36,
+                    ),
+                    QPointF(
+                        x + size * 0.48,
+                        y - size * 0.42,
+                    ),
+                ]
+            )
+            painter.drawPolyline(path)
+            return
+
+        if record_type == "text":
+            font = QFont()
+            font.setPointSizeF(
+                max(
+                    float(
+                        record.get(
+                            "font_size",
+                            11.0,
+                        )
+                    )
+                    * scale
+                    * 0.75,
+                    6.0,
+                )
+            )
+            painter.setFont(font)
+            painter.setPen(
+                QColor(
+                    str(
+                        record.get(
+                            "text_color",
+                            "#000000",
+                        )
+                    )
+                )
+            )
+            painter.drawText(
+                QPointF(x, y),
+                str(record.get("text", "")),
+            )
+            return
+
+        if record_type == "date_stamp":
+            size = float(
+                record.get("size", 72.0)
+            ) * scale
+            rect = QRectF(
+                x - size / 2,
+                y - size / 2,
+                size,
+                size,
+            )
+            painter.drawEllipse(rect)
+            painter.drawLine(
+                QPointF(
+                    rect.left(),
+                    y - size * 0.13,
+                ),
+                QPointF(
+                    rect.right(),
+                    y - size * 0.13,
+                ),
+            )
+            painter.drawLine(
+                QPointF(
+                    rect.left(),
+                    y + size * 0.13,
+                ),
+                QPointF(
+                    rect.right(),
+                    y + size * 0.13,
+                ),
+            )
+            font = QFont()
+            font.setPointSizeF(
+                max(size * 0.09, 6.0)
+            )
+            painter.setFont(font)
+            for text, offset in (
+                (
+                    record.get("top", ""),
+                    -size * 0.24,
+                ),
+                (
+                    record.get("date", ""),
+                    size * 0.02,
+                ),
+                (
+                    record.get("bottom", ""),
+                    size * 0.27,
+                ),
+            ):
+                painter.drawText(
+                    QRectF(
+                        rect.left(),
+                        y + offset - size * 0.08,
+                        rect.width(),
+                        size * 0.16,
+                    ),
+                    Qt.AlignmentFlag.AlignCenter,
+                    str(text),
+                )
+            return
+
+        if record_type in {
+            "freehand",
+            "highlighter",
+        }:
+            points = record.get(
+                "points",
+                [],
+            )
+            polygon = QPolygonF()
+            for point in points:
+                if (
+                    isinstance(
+                        point,
+                        (list, tuple),
+                    )
+                    and len(point) >= 2
+                ):
+                    polygon.append(
+                        QPointF(
+                            x
+                            + float(point[0])
+                            * scale,
+                            y
+                            + float(point[1])
+                            * scale,
+                        )
+                    )
+            if polygon.size() >= 2:
+                painter.drawPolyline(polygon)
+            return
+
+        if record_type == "arrow":
+            end_x = (
+                x
+                + float(record.get("dx", 80.0))
+                * scale
+            )
+            end_y = (
+                y
+                + float(record.get("dy", 0.0))
+                * scale
+            )
+            painter.drawLine(
+                QPointF(x, y),
+                QPointF(end_x, end_y),
+            )
+
+            import math
+            angle = math.atan2(
+                end_y - y,
+                end_x - x,
+            )
+            head = max(
+                8.0 * scale,
+                line_width * 3.0,
+            )
+            for delta in (
+                2.55,
+                -2.55,
+            ):
+                painter.drawLine(
+                    QPointF(end_x, end_y),
+                    QPointF(
+                        end_x
+                        + head
+                        * math.cos(
+                            angle + delta
+                        ),
+                        end_y
+                        + head
+                        * math.sin(
+                            angle + delta
+                        ),
+                    ),
+                )
+            return
+
+        width = float(
+            record.get("width", 80.0)
+        ) * scale
+        height = float(
+            record.get("height", 50.0)
+        ) * scale
+        rect = QRectF(
+            x,
+            y,
+            width,
+            height,
+        )
+
+        if bool(
+            record.get(
+                "fill_enabled",
+                False,
+            )
+        ):
+            fill = QColor(
+                str(
+                    record.get(
+                        "fill_color",
+                        "#ffff00",
+                    )
+                )
+            )
+            fill.setAlphaF(
+                max(
+                    0.0,
+                    min(
+                        float(
+                            record.get(
+                                "fill_opacity",
+                                0.25,
+                            )
+                        ),
+                        1.0,
+                    ),
+                )
+            )
+            painter.setBrush(QBrush(fill))
+
+        if record_type == "ellipse":
+            painter.drawEllipse(rect)
+        elif record_type in {
+            "rectangle",
+            "cloud",
+        }:
+            painter.drawRect(rect)
+
+        text = str(
+            record.get("text", "")
+        )
+        if text:
+            font = QFont()
+            font.setPointSizeF(
+                max(
+                    float(
+                        record.get(
+                            "font_size",
+                            11.0,
+                        )
+                    )
+                    * scale
+                    * 0.75,
+                    6.0,
+                )
+            )
+            painter.setFont(font)
+            painter.setPen(
+                QColor(
+                    str(
+                        record.get(
+                            "text_color",
+                            "#000000",
+                        )
+                    )
+                )
+            )
+            painter.drawText(
+                rect.adjusted(
+                    4,
+                    4,
+                    -4,
+                    -4,
+                ),
+                Qt.AlignmentFlag.AlignCenter
+                | Qt.TextFlag.TextWordWrap,
+                text,
+            )
+
     def save_pdf(self):
         if not self.document.has_document():
             return
@@ -5960,6 +7123,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._capture_active_document_tab()
+        self._save_layout_silently()
         self.render_timer.stop()
         self.visible_tile_timer.stop()
         self.scroll_settle_timer.stop()
