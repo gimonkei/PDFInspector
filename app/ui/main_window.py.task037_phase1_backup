@@ -2,11 +2,13 @@ from copy import deepcopy
 from datetime import date
 from time import perf_counter
 import json
+import re
 import uuid
+import fitz
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QStandardPaths, Qt, QTimer, QSize
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDrag, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QPointF, QRectF, QStandardPaths, Qt, QTimer, QSize, QUrl, Signal
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QDrag, QFont, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
+    QFontComboBox,
     QFormLayout,
     QLabel,
     QLineEdit,
@@ -50,6 +53,19 @@ from app.pdf.render_pipeline import RenderPipeline
 from app.pdf.render_manager import RenderManager
 from app.pdf.renderer import PDFRenderer
 from app.viewer.pdf_view import PDFView
+from app.annotations.image_annotation import (
+    draw_image_annotation,
+    install_image_annotation,
+)
+from app.annotations.stamp_callout import (
+    commit_annotation_to_document,
+    install_stamp_callout,
+)
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+from app.application.window_registry import WindowRegistry
+from app.ui.tearoff_tab_bar import TearOffTabBar
+from app.printing.print_controller import PrintController
+from app.version import APP_DISPLAY_NAME
 
 
 def _set_color_button(button, color):
@@ -57,6 +73,282 @@ def _set_color_button(button, color):
     fg = "#000000" if color.lightness() > 145 else "#ffffff"
     button.setText(name.upper())
     button.setStyleSheet(f"QPushButton {{background-color: {name}; color: {fg}; padding: 5px 12px;}}")
+
+
+class CommentCreateDialog(QDialog):
+    def __init__(self, parent, defaults):
+        super().__init__(parent)
+        self.setWindowTitle("コメント追加")
+        self.resize(520, 560)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setMinimumHeight(150)
+        self.text_edit.setPlaceholderText(
+            "コメント内容を入力してください"
+        )
+        form.addRow("コメント:", self.text_edit)
+
+        self.font_combo = QFontComboBox(self)
+        self.font_combo.setCurrentFont(
+            QFont(
+                str(
+                    defaults.get(
+                        "font_family",
+                        "Meiryo",
+                    )
+                )
+            )
+        )
+        form.addRow("フォント:", self.font_combo)
+
+        self.font_size_spin = QDoubleSpinBox(self)
+        self.font_size_spin.setRange(6.0, 144.0)
+        self.font_size_spin.setDecimals(1)
+        self.font_size_spin.setSingleStep(1.0)
+        self.font_size_spin.setSuffix(" pt")
+        self.font_size_spin.setValue(
+            max(
+                float(
+                    defaults.get(
+                        "font_size",
+                        11.0,
+                    )
+                ),
+                6.0,
+            )
+        )
+        form.addRow("文字サイズ:", self.font_size_spin)
+
+        self._text_color = QColor(
+            str(
+                defaults.get(
+                    "text_color",
+                    "#dc0000",
+                )
+            )
+        )
+        if not self._text_color.isValid():
+            self._text_color = QColor("#dc0000")
+
+        self.text_color_button = QPushButton(self)
+        self.text_color_button.clicked.connect(
+            self._choose_text_color
+        )
+        _set_color_button(
+            self.text_color_button,
+            self._text_color,
+        )
+        form.addRow("文字色:", self.text_color_button)
+
+        self.underline_check = QCheckBox(
+            "文字に下線を付ける",
+            self,
+        )
+        self.underline_check.setChecked(
+            bool(
+                defaults.get(
+                    "underline",
+                    False,
+                )
+            )
+        )
+        form.addRow("装飾:", self.underline_check)
+
+        self.border_check = QCheckBox(
+            "文字を枠で囲む",
+            self,
+        )
+        self.border_check.setChecked(
+            bool(
+                defaults.get(
+                    "border_enabled",
+                    False,
+                )
+            )
+        )
+        form.addRow("枠:", self.border_check)
+
+        self._border_color = QColor(
+            str(
+                defaults.get(
+                    "border_color",
+                    "#dc0000",
+                )
+            )
+        )
+        if not self._border_color.isValid():
+            self._border_color = QColor("#dc0000")
+
+        self.border_color_button = QPushButton(self)
+        self.border_color_button.clicked.connect(
+            self._choose_border_color
+        )
+        _set_color_button(
+            self.border_color_button,
+            self._border_color,
+        )
+        form.addRow(
+            "枠線色:",
+            self.border_color_button,
+        )
+
+        self.border_width_spin = QDoubleSpinBox(self)
+        self.border_width_spin.setRange(0.5, 20.0)
+        self.border_width_spin.setDecimals(1)
+        self.border_width_spin.setSingleStep(0.5)
+        self.border_width_spin.setSuffix(" pt")
+        self.border_width_spin.setValue(
+            max(
+                float(
+                    defaults.get(
+                        "border_width",
+                        1.5,
+                    )
+                ),
+                0.5,
+            )
+        )
+        form.addRow(
+            "枠線太さ:",
+            self.border_width_spin,
+        )
+
+        self.border_padding_x_spin = QDoubleSpinBox(self)
+        self.border_padding_x_spin.setRange(0.0, 20.0)
+        self.border_padding_x_spin.setDecimals(1)
+        self.border_padding_x_spin.setSingleStep(0.5)
+        self.border_padding_x_spin.setSuffix(" px")
+        self.border_padding_x_spin.setValue(
+            max(
+                float(
+                    defaults.get(
+                        "border_padding_x",
+                        2.0,
+                    )
+                ),
+                0.0,
+            )
+        )
+        form.addRow(
+            "左右余白:",
+            self.border_padding_x_spin,
+        )
+
+        self.border_padding_y_spin = QDoubleSpinBox(self)
+        self.border_padding_y_spin.setRange(0.0, 20.0)
+        self.border_padding_y_spin.setDecimals(1)
+        self.border_padding_y_spin.setSingleStep(0.5)
+        self.border_padding_y_spin.setSuffix(" px")
+        self.border_padding_y_spin.setValue(
+            max(
+                float(
+                    defaults.get(
+                        "border_padding_y",
+                        1.0,
+                    )
+                ),
+                0.0,
+            )
+        )
+        form.addRow(
+            "上下余白:",
+            self.border_padding_y_spin,
+        )
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            "ここで設定した内容は、配置後の右側プロパティでも"
+            "変更できます。次回のコメントにも引き継がれます。",
+            self,
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.text_edit.setFocus()
+
+    def _choose_text_color(self):
+        color = QColorDialog.getColor(
+            self._text_color,
+            self,
+            "文字色を選択",
+        )
+        if color.isValid():
+            color.setAlpha(255)
+            self._text_color = color
+            _set_color_button(
+                self.text_color_button,
+                color,
+            )
+
+    def _choose_border_color(self):
+        color = QColorDialog.getColor(
+            self._border_color,
+            self,
+            "枠線色を選択",
+        )
+        if color.isValid():
+            color.setAlpha(255)
+            self._border_color = color
+            _set_color_button(
+                self.border_color_button,
+                color,
+            )
+
+    def _accept_if_valid(self):
+        if not self.text_edit.toPlainText().strip():
+            QMessageBox.information(
+                self,
+                "コメント追加",
+                "コメント内容を入力してください。",
+            )
+            self.text_edit.setFocus()
+            return
+        self.accept()
+
+    def values(self):
+        return {
+            "text": self.text_edit.toPlainText().strip(),
+            "font_family": (
+                self.font_combo.currentFont().family()
+            ),
+            "font_size": (
+                self.font_size_spin.value()
+            ),
+            "text_color": self._text_color.name(
+                QColor.NameFormat.HexRgb
+            ),
+            "underline": (
+                self.underline_check.isChecked()
+            ),
+            "border_enabled": (
+                self.border_check.isChecked()
+            ),
+            "border_color": self._border_color.name(
+                QColor.NameFormat.HexRgb
+            ),
+            "border_width": (
+                self.border_width_spin.value()
+            ),
+            "border_padding_x": (
+                self.border_padding_x_spin.value()
+            ),
+            "border_padding_y": (
+                self.border_padding_y_spin.value()
+            ),
+        }
 
 
 class LinePropertiesDialog(QDialog):
@@ -253,6 +545,8 @@ class AnnotationPropertiesPanel(QWidget):
         "ellipse": "円・楕円",
         "cloud": "クラウド",
         "freehand": "手書き",
+        "stamp": "スタンプ",
+        "callout": "吹き出し",
     }
 
     def __init__(self, main_window):
@@ -480,8 +774,142 @@ class AnnotationPropertiesPanel(QWidget):
         elif record_type == "text":
             self.text_edit = QTextEdit(self)
             self.text_edit.setMaximumHeight(140)
+            self.text_edit.setPlainText(
+                str(record.get("text", ""))
+            )
+            self.form_layout.addRow(
+                "コメント:",
+                self.text_edit,
+            )
+
+            self.font_combo = QFontComboBox(self)
+            self.font_combo.setCurrentFont(
+                QFont(
+                    str(
+                        record.get(
+                            "font_family",
+                            "Meiryo",
+                        )
+                    )
+                )
+            )
+            self.form_layout.addRow(
+                "フォント:",
+                self.font_combo,
+            )
+
+            self.font_size_spin = self._add_double(
+                "文字サイズ",
+                record.get("font_size", 11.0),
+                6.0,
+                144.0,
+                1.0,
+                " pt",
+            )
+
+            self._add_color(
+                "text_color",
+                "文字色",
+                record.get(
+                    "text_color",
+                    "#dc0000",
+                ),
+            )
+
+            self.underline_check = QCheckBox(
+                "文字に下線を付ける",
+                self,
+            )
+            self.underline_check.setChecked(
+                bool(
+                    record.get(
+                        "underline",
+                        False,
+                    )
+                )
+            )
+            self.form_layout.addRow(
+                "装飾:",
+                self.underline_check,
+            )
+
+            self.border_check = QCheckBox(
+                "文字を枠で囲む",
+                self,
+            )
+            self.border_check.setChecked(
+                bool(
+                    record.get(
+                        "border_enabled",
+                        False,
+                    )
+                )
+            )
+            self.form_layout.addRow(
+                "枠:",
+                self.border_check,
+            )
+
+            self._add_color(
+                "comment_border_color",
+                "枠線色",
+                record.get(
+                    "border_color",
+                    "#dc0000",
+                ),
+            )
+
+            self.border_width_spin = self._add_double(
+                "枠線太さ",
+                record.get("border_width", 1.5),
+                0.5,
+                20.0,
+                0.5,
+                " pt",
+            )
+
+            self.border_padding_x_spin = self._add_double(
+                "左右余白",
+                record.get("border_padding_x", 2.0),
+                0.0,
+                20.0,
+                0.5,
+                " px",
+            )
+            self.border_padding_y_spin = self._add_double(
+                "上下余白",
+                record.get("border_padding_y", 1.0),
+                0.0,
+                20.0,
+                0.5,
+                " px",
+            )
+
+        elif record_type == "stamp":
+            self.text_edit = QTextEdit(self)
+            self.text_edit.setMaximumHeight(90)
             self.text_edit.setPlainText(str(record.get("text", "")))
-            self.form_layout.addRow("コメント:", self.text_edit)
+            self.form_layout.addRow("文字:", self.text_edit)
+            self._add_color("color", "色", record.get("color", "#d00000"))
+            self.width_spin = self._add_double("幅", record.get("width", 92.0), 30.0, 1000.0, 1.0, " pt")
+            self.height_spin = self._add_double("高さ", record.get("height", 34.0), 20.0, 500.0, 1.0, " pt")
+            self.font_size_spin = self._add_double("文字サイズ", record.get("font_size", 14.0), 6.0, 144.0, 1.0, " pt")
+            self.line_width_spin = self._add_double("枠線太さ", record.get("line_width", 2.5), 0.5, 20.0, 0.5, " pt")
+
+        elif record_type == "callout":
+            self.text_edit = QTextEdit(self)
+            self.text_edit.setMaximumHeight(110)
+            self.text_edit.setPlainText(str(record.get("text", "")))
+            self.form_layout.addRow("文字:", self.text_edit)
+            self._add_color("border_color", "枠線色", record.get("color", "#d00000"))
+            self._add_color("arrow_color", "矢印色", record.get("arrow_color", record.get("color", "#d00000")))
+            self._add_color("fill_color", "背景色", record.get("fill_color", "#fff8c6"))
+            self._add_color("text_color", "文字色", record.get("text_color", "#000000"))
+            self.line_width_spin = self._add_double("線の太さ", record.get("line_width", 2.0), 0.5, 20.0, 0.5, " pt")
+            self.font_size_spin = self._add_double("文字サイズ", record.get("font_size", 11.0), 6.0, 72.0, 1.0, " pt")
+            self.width_spin = self._add_double("幅", record.get("width", 180.0), 90.0, 3000.0, 1.0, " pt")
+            self.height_spin = self._add_double("高さ", record.get("height", 74.0), 46.0, 3000.0, 1.0, " pt")
+            self.opacity_spin = self._add_double("背景の濃さ", float(record.get("fill_opacity", 0.72)) * 100.0, 0.0, 100.0, 5.0, " %")
 
         elif record_type == "date_stamp":
             self.top_edit = QLineEdit(
@@ -559,6 +987,44 @@ class AnnotationPropertiesPanel(QWidget):
             self.text_edit.textChanged.connect(
                 self._schedule_text_apply
             )
+
+        if record_type == "text":
+            self.font_combo.currentFontChanged.connect(
+                self._apply_numeric_change
+            )
+            self.font_size_spin.valueChanged.connect(
+                self._apply_numeric_change
+            )
+            self.underline_check.toggled.connect(
+                self._apply_numeric_change
+            )
+            self.border_check.toggled.connect(
+                self._apply_numeric_change
+            )
+            self.border_width_spin.valueChanged.connect(
+                self._apply_numeric_change
+            )
+            self.border_padding_x_spin.valueChanged.connect(
+                self._apply_numeric_change
+            )
+            self.border_padding_y_spin.valueChanged.connect(
+                self._apply_numeric_change
+            )
+
+        if record_type == "stamp":
+            self.text_edit.textChanged.connect(self._schedule_text_apply)
+            self.width_spin.valueChanged.connect(self._apply_numeric_change)
+            self.height_spin.valueChanged.connect(self._apply_numeric_change)
+            self.font_size_spin.valueChanged.connect(self._apply_numeric_change)
+            self.line_width_spin.valueChanged.connect(self._apply_numeric_change)
+
+        if record_type == "callout":
+            self.text_edit.textChanged.connect(self._schedule_text_apply)
+            self.line_width_spin.valueChanged.connect(self._apply_numeric_change)
+            self.font_size_spin.valueChanged.connect(self._apply_numeric_change)
+            self.width_spin.valueChanged.connect(self._apply_numeric_change)
+            self.height_spin.valueChanged.connect(self._apply_numeric_change)
+            self.opacity_spin.valueChanged.connect(self._apply_numeric_change)
 
         if record_type == "date_stamp":
             self.top_edit.textChanged.connect(
@@ -790,10 +1256,99 @@ class AnnotationPropertiesPanel(QWidget):
             )
 
         elif record_type == "text":
-            text = self.text_edit.toPlainText().strip()
             before = view._history_snapshot()
-            record["text"] = text
-            item.setPlainText(text)
+
+            values = {
+                "text": (
+                    self.text_edit.toPlainText().strip()
+                ),
+                "font_family": (
+                    self.font_combo.currentFont().family()
+                ),
+                "font_size": (
+                    self.font_size_spin.value()
+                ),
+                "text_color": self._color_name(
+                    "text_color",
+                    "#dc0000",
+                ),
+                "underline": (
+                    self.underline_check.isChecked()
+                ),
+                "border_enabled": (
+                    self.border_check.isChecked()
+                ),
+                "border_color": self._color_name(
+                    "comment_border_color",
+                    "#dc0000",
+                ),
+                "border_width": (
+                    self.border_width_spin.value()
+                ),
+                "border_padding_x": (
+                    self.border_padding_x_spin.value()
+                ),
+                "border_padding_y": (
+                    self.border_padding_y_spin.value()
+                ),
+            }
+            record.update(values)
+
+            if hasattr(
+                item,
+                "refresh_from_record",
+            ):
+                item.refresh_from_record()
+            else:
+                item.setPlainText(
+                    values["text"]
+                )
+                item.update()
+
+            view._refresh_selection_overlay()
+            view._commit_history_change(before)
+
+            self.main_window._remember_annotation_defaults(
+                "text",
+                {
+                    key: value
+                    for key, value in values.items()
+                    if key != "text"
+                },
+            )
+
+        elif record_type == "stamp":
+            before = view._history_snapshot()
+            record["text"] = self.text_edit.toPlainText().strip()
+            record["color"] = self._color_name("color", "#d00000")
+            record["width"] = self.width_spin.value()
+            record["height"] = self.height_spin.value()
+            record["font_size"] = self.font_size_spin.value()
+            record["line_width"] = self.line_width_spin.value()
+            if hasattr(item, "refresh_from_record"):
+                item.refresh_from_record()
+            else:
+                item.update()
+            view._refresh_selection_overlay()
+            view._commit_history_change(before)
+
+        elif record_type == "callout":
+            before = view._history_snapshot()
+            record["text"] = self.text_edit.toPlainText().strip()
+            record["color"] = self._color_name("border_color", "#d00000")
+            record["arrow_color"] = self._color_name("arrow_color", record["color"])
+            record["fill_color"] = self._color_name("fill_color", "#fff8c6")
+            record["text_color"] = self._color_name("text_color", "#000000")
+            record["line_width"] = self.line_width_spin.value()
+            record["font_size"] = self.font_size_spin.value()
+            record["width"] = self.width_spin.value()
+            record["height"] = self.height_spin.value()
+            record["fill_opacity"] = self.opacity_spin.value() / 100.0
+            if hasattr(item, "refresh_from_record"):
+                item.refresh_from_record()
+            else:
+                item.update()
+            view._refresh_selection_overlay()
             view._commit_history_change(before)
 
         elif record_type == "date_stamp":
@@ -2283,11 +2838,26 @@ class PageThumbnailPanel(QWidget):
 
 
 class MainWindow(QMainWindow):
+    _detached_windows = []
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDFInspector")
+
+        self.window_id = WindowRegistry.register(self)
+        self.destroyed.connect(
+            lambda *_args, window_id=self.window_id: (
+                WindowRegistry.unregister(window_id)
+            )
+        )
+        self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1200, 800)
         self.setAcceptDrops(True)
+
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
+            | QMainWindow.DockOption.GroupedDragging
+        )
 
         self.document = PDFDocument()
         self.renderer = PDFRenderer()
@@ -2336,7 +2906,23 @@ class MainWindow(QMainWindow):
         self.view.selection_count_changed.connect(
             self.on_selection_count_changed
         )
-        self.setCentralWidget(self.view)
+        self.view.annotation_mode_changed.connect(
+            self.on_view_annotation_mode_changed
+        )
+        self.central_stack = QStackedWidget(self)
+        self.home_widget = self._create_home_widget()
+        self.central_stack.addWidget(
+            self.home_widget
+        )
+        self.central_stack.addWidget(
+            self.view
+        )
+        self.setCentralWidget(
+            self.central_stack
+        )
+        self.central_stack.setCurrentWidget(
+            self.home_widget
+        )
 
         # During scrolling, completed render results are held back so tile
         # replacement cannot interrupt scrollbar and viewport movement.
@@ -2393,11 +2979,18 @@ class MainWindow(QMainWindow):
         self.visible_tile_timer.timeout.connect(self.render_visible_tiles)
 
         self.create_toolbar()
+        install_image_annotation(self)
+        install_stamp_callout(self)
         self.create_document_tab_bar()
         self.create_page_thumbnail_panel()
         self.create_date_stamp_panel()
         self.create_annotation_properties_panel()
         self.create_annotation_layer_panel()
+        self.create_layout_menu()
+        QTimer.singleShot(
+            0,
+            self.restore_workspace_layout,
+        )
         QTimer.singleShot(
             0,
             self._position_annotation_layer_toggle,
@@ -2405,6 +2998,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(
             0,
             self._position_page_thumbnail_toggle,
+        )
+        QTimer.singleShot(
+            0,
+            self.show_home_screen,
         )
 
     def _get_annotation_defaults_path(self):
@@ -2686,7 +3283,7 @@ class MainWindow(QMainWindow):
         )
         self.clear_selection_action.setShortcut("Esc")
         self.clear_selection_action.triggered.connect(
-            self.view.cancel_current_operation
+            self.view.handle_escape
         )
 
         self.select_all_action = QAction("すべて選択", self)
@@ -2790,6 +3387,17 @@ class MainWindow(QMainWindow):
         )
         toolbar.addWidget(spacer)
 
+        print_action = QAction("🖨 印刷", self)
+        print_action.setToolTip("印刷 (Ctrl+P)")
+        print_action.setShortcut(
+            QKeySequence.StandardKey.Print
+        )
+        print_action.triggered.connect(
+            self.print_document
+        )
+        toolbar.addAction(print_action)
+        toolbar.addSeparator()
+
         save_action = QAction("💾 保存", self)
         save_action.setToolTip("保存 (Ctrl+S)")
         save_action.setShortcut("Ctrl+S")
@@ -2883,6 +3491,14 @@ class MainWindow(QMainWindow):
         )
         self.annotation_layer_dock.setObjectName(
             "annotationLayerDock"
+        )
+        self.annotation_layer_dock.setAllowedAreas(
+            Qt.DockWidgetArea.AllDockWidgetAreas
+        )
+        self.annotation_layer_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
 
         self.annotation_layer_panel = (
@@ -3121,9 +3737,785 @@ class MainWindow(QMainWindow):
         return
 
 
+
+
+    def _workspace_layout_path(self):
+        config_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppConfigLocation
+            )
+        )
+        config_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        return config_dir / "workspace_layout.json"
+
+    def create_layout_menu(self):
+        view_menu = self.menuBar().addMenu(
+            "表示"
+        )
+
+        self.page_thumbnail_view_action = (
+            self.page_thumbnail_dock.toggleViewAction()
+        )
+        self.page_thumbnail_view_action.setText(
+            "ページ一覧"
+        )
+
+        self.annotation_layer_view_action = (
+            self.annotation_layer_dock.toggleViewAction()
+        )
+        self.annotation_layer_view_action.setText(
+            "注釈・プロパティ"
+        )
+
+        view_menu.addAction(
+            self.page_thumbnail_view_action
+        )
+        view_menu.addAction(
+            self.annotation_layer_view_action
+        )
+        view_menu.addSeparator()
+
+        save_layout_action = QAction(
+            "現在のレイアウトを保存",
+            self,
+        )
+        save_layout_action.triggered.connect(
+            self.save_workspace_layout
+        )
+        view_menu.addAction(save_layout_action)
+
+        restore_layout_action = QAction(
+            "保存したレイアウトを復元",
+            self,
+        )
+        restore_layout_action.triggered.connect(
+            self.restore_workspace_layout
+        )
+        view_menu.addAction(restore_layout_action)
+
+        reset_layout_action = QAction(
+            "標準レイアウトに戻す",
+            self,
+        )
+        reset_layout_action.triggered.connect(
+            self.reset_workspace_layout
+        )
+        view_menu.addAction(reset_layout_action)
+
+
+    def _ensure_workspace_object_names(self):
+        used_names = set()
+
+        for widget in self.findChildren(QDockWidget):
+            name = widget.objectName().strip()
+            if not name:
+                title = re.sub(
+                    r"[^0-9A-Za-z_]+",
+                    "_",
+                    widget.windowTitle().strip(),
+                ).strip("_")
+                base = (
+                    f"dock_{title}"
+                    if title
+                    else "dock_widget"
+                )
+                name = base
+                suffix = 2
+                while name in used_names:
+                    name = f"{base}_{suffix}"
+                    suffix += 1
+                widget.setObjectName(name)
+            used_names.add(name)
+
+        for widget in self.findChildren(QToolBar):
+            name = widget.objectName().strip()
+            if not name:
+                title = re.sub(
+                    r"[^0-9A-Za-z_]+",
+                    "_",
+                    widget.windowTitle().strip(),
+                ).strip("_")
+                base = (
+                    f"toolbar_{title}"
+                    if title
+                    else "toolbar_main"
+                )
+                name = base
+                suffix = 2
+                while name in used_names:
+                    name = f"{base}_{suffix}"
+                    suffix += 1
+                widget.setObjectName(name)
+            used_names.add(name)
+
+    def save_workspace_layout(self):
+        self._ensure_workspace_object_names()
+        data = {
+            "geometry": bytes(
+                self.saveGeometry().toBase64()
+            ).decode("ascii"),
+            "state": bytes(
+                self.saveState(1).toBase64()
+            ).decode("ascii"),
+            "annotation_splitter": (
+                self.annotation_side_splitter.sizes()
+                if hasattr(
+                    self,
+                    "annotation_side_splitter",
+                )
+                else []
+            ),
+        }
+
+        try:
+            self._workspace_layout_path().write_text(
+                json.dumps(
+                    data,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "レイアウト保存",
+                f"レイアウトを保存できませんでした。\n{error}",
+            )
+
+    def restore_workspace_layout(self):
+        self._ensure_workspace_object_names()
+        path = self._workspace_layout_path()
+        if not path.exists():
+            return False
+
+        try:
+            data = json.loads(
+                path.read_text(encoding="utf-8")
+            )
+            geometry = QByteArray.fromBase64(
+                str(
+                    data.get("geometry", "")
+                ).encode("ascii")
+            )
+            state = QByteArray.fromBase64(
+                str(
+                    data.get("state", "")
+                ).encode("ascii")
+            )
+
+            if not geometry.isEmpty():
+                self.restoreGeometry(geometry)
+            if not state.isEmpty():
+                self.restoreState(state, 1)
+
+            splitter_sizes = data.get(
+                "annotation_splitter",
+                [],
+            )
+            if (
+                splitter_sizes
+                and hasattr(
+                    self,
+                    "annotation_side_splitter",
+                )
+            ):
+                self.annotation_side_splitter.setSizes(
+                    [
+                        max(1, int(value))
+                        for value in splitter_sizes
+                    ]
+                )
+
+            QTimer.singleShot(
+                0,
+                self._position_page_thumbnail_toggle,
+            )
+            QTimer.singleShot(
+                0,
+                self._position_annotation_layer_toggle,
+            )
+            return True
+
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            UnicodeEncodeError,
+        ):
+            return False
+
+    def reset_workspace_layout(self):
+        self.page_thumbnail_dock.setFloating(
+            False
+        )
+        self.annotation_layer_dock.setFloating(
+            False
+        )
+
+        self.removeDockWidget(
+            self.page_thumbnail_dock
+        )
+        self.removeDockWidget(
+            self.annotation_layer_dock
+        )
+
+        self.addDockWidget(
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            self.page_thumbnail_dock,
+        )
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.annotation_layer_dock,
+        )
+
+        self.resizeDocks(
+            [
+                self.page_thumbnail_dock,
+                self.annotation_layer_dock,
+            ],
+            [236, 380],
+            Qt.Orientation.Horizontal,
+        )
+
+        if self.document.has_document():
+            self.page_thumbnail_dock.show()
+            self.annotation_layer_dock.hide()
+        else:
+            self.page_thumbnail_dock.hide()
+            self.annotation_layer_dock.hide()
+
+        if hasattr(
+            self,
+            "annotation_side_splitter",
+        ):
+            self.annotation_side_splitter.setSizes(
+                [420, 300]
+            )
+
+        QTimer.singleShot(
+            0,
+            self._position_page_thumbnail_toggle,
+        )
+        QTimer.singleShot(
+            0,
+            self._position_annotation_layer_toggle,
+        )
+
+    def _save_layout_silently(self):
+        try:
+            self.save_workspace_layout()
+        except RuntimeError:
+            pass
+
+    def _create_home_widget(self):
+        home = QWidget(self)
+        home.setObjectName("homeScreen")
+        home.setAcceptDrops(False)
+
+        outer = QVBoxLayout(home)
+        outer.setContentsMargins(28, 24, 28, 24)
+        outer.setSpacing(14)
+
+        hero = QFrame(home)
+        hero.setObjectName("homeHero")
+        hero.setMaximumWidth(980)
+        hero.setStyleSheet(
+            """
+            QFrame#homeHero {
+                background: palette(base);
+                border: 1px solid palette(mid);
+                border-radius: 16px;
+            }
+            QLabel#logoMark {
+                min-width: 76px;
+                max-width: 76px;
+                min-height: 76px;
+                max-height: 76px;
+                border-radius: 18px;
+                background: palette(highlight);
+                color: palette(highlighted-text);
+                font-size: 25px;
+                font-weight: bold;
+            }
+            QLabel#homeTitle {
+                font-size: 30px;
+                font-weight: bold;
+                color: palette(text);
+            }
+            QLabel#homeSubtitle {
+                font-size: 14px;
+                color: palette(text);
+            }
+            QFrame#homeDropCard {
+                background: palette(alternate-base);
+                border: 2px dashed palette(highlight);
+                border-radius: 11px;
+            }
+            QLabel#homeDropTitle {
+                font-size: 16px;
+                font-weight: bold;
+                color: palette(text);
+            }
+            QLabel#homeDropDescription {
+                font-size: 13px;
+                color: palette(text);
+            }
+            QPushButton#homeOpenButton {
+                min-height: 44px;
+                padding: 0 26px;
+                font-size: 15px;
+                font-weight: bold;
+                border-radius: 7px;
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
+            QFrame#homeSection {
+                background: palette(base);
+                border: 1px solid palette(mid);
+                border-radius: 11px;
+            }
+            QLabel#homeSectionTitle {
+                font-size: 16px;
+                font-weight: bold;
+                color: palette(text);
+            }
+            QListWidget#homeList {
+                border: none;
+                background: transparent;
+                color: palette(text);
+                outline: none;
+            }
+            QListWidget#homeList::item {
+                padding: 7px;
+                border-radius: 5px;
+            }
+            QListWidget#homeList::item:hover {
+                background: palette(alternate-base);
+            }
+            QListWidget#homeList::item:selected {
+                background: palette(highlight);
+                color: palette(highlighted-text);
+            }
+            """
+        )
+
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(34, 28, 34, 30)
+        hero_layout.setSpacing(18)
+
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(18)
+
+        logo_mark = QLabel("PDF\n✓", hero)
+        logo_mark.setObjectName("logoMark")
+        logo_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(2)
+
+        title = QLabel("PDFInspector", hero)
+        title.setObjectName("homeTitle")
+
+        subtitle = QLabel(
+            "PDF図面の閲覧・注釈・ページ編集を、ひとつの画面で。",
+            hero,
+        )
+        subtitle.setObjectName("homeSubtitle")
+
+        brand_text.addWidget(title)
+        brand_text.addWidget(subtitle)
+        brand_text.addStretch(1)
+
+        brand_row.addWidget(logo_mark)
+        brand_row.addLayout(brand_text, 1)
+        hero_layout.addLayout(brand_row)
+
+        drop_card = QFrame(hero)
+        drop_card.setObjectName("homeDropCard")
+        drop_layout = QVBoxLayout(drop_card)
+        drop_layout.setContentsMargins(24, 20, 24, 20)
+        drop_layout.setSpacing(8)
+
+        drop_icon = QLabel("⇩  PDF", drop_card)
+        drop_icon.setObjectName("homeDropTitle")
+        drop_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        drop_title = QLabel(
+            "PDFをここへドラッグ＆ドロップ",
+            drop_card,
+        )
+        drop_title.setObjectName("homeDropTitle")
+        drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        drop_description = QLabel(
+            "複数のPDFもまとめて開けます",
+            drop_card,
+        )
+        drop_description.setObjectName("homeDropDescription")
+        drop_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        open_button = QPushButton("PDFを開く", drop_card)
+        open_button.setObjectName("homeOpenButton")
+        open_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_button.clicked.connect(self.open_pdf)
+
+        drop_layout.addWidget(drop_icon)
+        drop_layout.addWidget(drop_title)
+        drop_layout.addWidget(drop_description)
+        drop_layout.addWidget(
+            open_button,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        hero_layout.addWidget(drop_card)
+
+        lists_row = QHBoxLayout()
+        lists_row.setSpacing(14)
+
+        recent_section = QFrame(hero)
+        recent_section.setObjectName("homeSection")
+        recent_layout = QVBoxLayout(recent_section)
+        recent_layout.setContentsMargins(16, 14, 16, 14)
+        recent_layout.setSpacing(8)
+
+        recent_title = QLabel("最近使ったファイル", recent_section)
+        recent_title.setObjectName("homeSectionTitle")
+        self.home_recent_list = QListWidget(recent_section)
+        self.home_recent_list.setObjectName("homeList")
+        self.home_recent_list.setMinimumHeight(190)
+        self.home_recent_list.itemDoubleClicked.connect(
+            self._open_recent_item
+        )
+
+        recent_layout.addWidget(recent_title)
+        recent_layout.addWidget(self.home_recent_list, 1)
+
+        favorites_section = QFrame(hero)
+        favorites_section.setObjectName("homeSection")
+        favorites_layout = QVBoxLayout(favorites_section)
+        favorites_layout.setContentsMargins(16, 14, 16, 14)
+        favorites_layout.setSpacing(8)
+
+        favorites_header = QHBoxLayout()
+        favorites_title = QLabel(
+            "お気に入りフォルダ",
+            favorites_section,
+        )
+        favorites_title.setObjectName("homeSectionTitle")
+        favorite_add_button = QPushButton(
+            "＋ 登録",
+            favorites_section,
+        )
+        favorite_remove_button = QPushButton(
+            "削除",
+            favorites_section,
+        )
+        favorite_add_button.clicked.connect(
+            self.add_favorite_folder
+        )
+        favorite_remove_button.clicked.connect(
+            self.remove_selected_favorite_folder
+        )
+
+        favorites_header.addWidget(favorites_title)
+        favorites_header.addStretch(1)
+        favorites_header.addWidget(favorite_add_button)
+        favorites_header.addWidget(favorite_remove_button)
+
+        self.home_favorites_list = QListWidget(
+            favorites_section
+        )
+        self.home_favorites_list.setObjectName("homeList")
+        self.home_favorites_list.setMinimumHeight(190)
+        self.home_favorites_list.itemDoubleClicked.connect(
+            self._open_favorite_item
+        )
+
+        favorites_layout.addLayout(favorites_header)
+        favorites_layout.addWidget(
+            self.home_favorites_list,
+            1,
+        )
+
+        lists_row.addWidget(recent_section, 1)
+        lists_row.addWidget(favorites_section, 1)
+        hero_layout.addLayout(lists_row)
+
+        shortcut_label = QLabel(
+            "Ctrl＋O：PDFを開く　｜　最近使ったファイルはダブルクリック",
+            hero,
+        )
+        shortcut_label.setObjectName("homeSubtitle")
+        shortcut_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(shortcut_label)
+
+        outer.addStretch(1)
+        outer.addWidget(
+            hero,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        outer.addStretch(1)
+
+        return home
+
+
+
+    def _home_data_path(self):
+        config_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppConfigLocation
+            )
+        )
+        config_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        return config_dir / "home_data.json"
+
+    def _load_home_data(self):
+        path = self._home_data_path()
+        if not path.exists():
+            return {
+                "recent_files": [],
+                "favorite_folders": [],
+            }
+
+        try:
+            data = json.loads(
+                path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            data = {}
+
+        return {
+            "recent_files": list(
+                data.get("recent_files", [])
+            ),
+            "favorite_folders": list(
+                data.get("favorite_folders", [])
+            ),
+        }
+
+    def _save_home_data(self):
+        data = {
+            "recent_files": list(
+                getattr(self, "_recent_files", [])
+            ),
+            "favorite_folders": list(
+                getattr(self, "_favorite_folders", [])
+            ),
+        }
+        try:
+            self._home_data_path().write_text(
+                json.dumps(
+                    data,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _ensure_home_data_loaded(self):
+        if hasattr(self, "_recent_files"):
+            return
+
+        data = self._load_home_data()
+        self._recent_files = [
+            str(path)
+            for path in data["recent_files"]
+            if Path(path).exists()
+        ][:10]
+        self._favorite_folders = [
+            str(path)
+            for path in data["favorite_folders"]
+            if Path(path).is_dir()
+        ]
+
+    def _remember_recent_file(self, path):
+        self._ensure_home_data_loaded()
+        normalized = str(Path(path))
+        self._recent_files = [
+            item
+            for item in self._recent_files
+            if str(Path(item)).lower()
+            != normalized.lower()
+        ]
+        self._recent_files.insert(0, normalized)
+        self._recent_files = self._recent_files[:10]
+        self._save_home_data()
+        self._refresh_home_lists()
+
+    def _refresh_home_lists(self):
+        self._ensure_home_data_loaded()
+
+        if hasattr(self, "home_recent_list"):
+            self.home_recent_list.clear()
+            for path in self._recent_files:
+                item = QListWidgetItem(
+                    f"📄  {Path(path).name}"
+                )
+                item.setData(
+                    Qt.ItemDataRole.UserRole,
+                    path,
+                )
+                item.setToolTip(path)
+                self.home_recent_list.addItem(item)
+
+            if not self._recent_files:
+                item = QListWidgetItem(
+                    "最近使ったファイルはありません"
+                )
+                item.setFlags(
+                    item.flags()
+                    & ~Qt.ItemFlag.ItemIsEnabled
+                )
+                self.home_recent_list.addItem(item)
+
+        if hasattr(self, "home_favorites_list"):
+            self.home_favorites_list.clear()
+            for path in self._favorite_folders:
+                item = QListWidgetItem(
+                    f"📁  {Path(path).name or path}"
+                )
+                item.setData(
+                    Qt.ItemDataRole.UserRole,
+                    path,
+                )
+                item.setToolTip(path)
+                self.home_favorites_list.addItem(item)
+
+            if not self._favorite_folders:
+                item = QListWidgetItem(
+                    "「＋ 登録」からフォルダを追加できます"
+                )
+                item.setFlags(
+                    item.flags()
+                    & ~Qt.ItemFlag.ItemIsEnabled
+                )
+                self.home_favorites_list.addItem(item)
+
+    def _open_recent_item(self, item):
+        path = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if path and Path(path).is_file():
+            self.open_pdf_path(path)
+
+    def add_favorite_folder(self):
+        self._ensure_home_data_loaded()
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "お気に入りフォルダを登録",
+            "",
+        )
+        if not folder:
+            return
+
+        normalized = str(Path(folder))
+        if normalized not in self._favorite_folders:
+            self._favorite_folders.append(normalized)
+            self._save_home_data()
+        self._refresh_home_lists()
+
+    def remove_selected_favorite_folder(self):
+        if not hasattr(self, "home_favorites_list"):
+            return
+
+        item = self.home_favorites_list.currentItem()
+        if item is None:
+            return
+
+        path = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if not path:
+            return
+
+        self._favorite_folders = [
+            folder
+            for folder in self._favorite_folders
+            if folder != path
+        ]
+        self._save_home_data()
+        self._refresh_home_lists()
+
+    def _open_favorite_item(self, item):
+        path = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        if path and Path(path).is_dir():
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(path)
+            )
+
+    def show_home_screen(self):
+        # MainWindow.__init__ schedules the initial home screen with
+        # QTimer.singleShot(0, ...). A detached window can receive and load
+        # its transferred session before that queued callback runs. Do not
+        # let the stale startup callback erase an already attached document.
+        if self._document_tabs:
+            return
+
+        self.render_timer.stop()
+        self.visible_tile_timer.stop()
+        self.scroll_settle_timer.stop()
+        self.render_pipeline.invalidate()
+        self.render_manager.clear()
+
+        self.view.clear_pending_annotations()
+        self.view._annotation_records = []
+        self.view.clear_pages()
+
+        self.current_page = 0
+        self.selected_date_stamp_item = None
+
+        self.central_stack.setCurrentWidget(
+            self.home_widget
+        )
+        self._refresh_home_lists()
+
+        self.document_tab_toolbar.hide()
+
+        if hasattr(self, "page_thumbnail_dock"):
+            self.page_thumbnail_dock.hide()
+            self.page_thumbnail_toggle.blockSignals(True)
+            self.page_thumbnail_toggle.setChecked(False)
+            self.page_thumbnail_toggle.setText("▶")
+            self.page_thumbnail_toggle.blockSignals(False)
+            self._position_page_thumbnail_toggle()
+
+        if hasattr(self, "annotation_layer_dock"):
+            self.annotation_layer_dock.hide()
+            self.annotation_layer_toggle.blockSignals(True)
+            self.annotation_layer_toggle.setChecked(False)
+            self.annotation_layer_toggle.blockSignals(False)
+
+        self.setWindowTitle(APP_DISPLAY_NAME)
+        self.update_toolbar()
+
+    def show_document_workspace(self):
+        self.central_stack.setCurrentWidget(
+            self.view
+        )
+
     def create_page_thumbnail_panel(self):
         self.page_thumbnail_dock = QDockWidget("ページ一覧", self)
         self.page_thumbnail_dock.setObjectName("pageThumbnailDock")
+        self.page_thumbnail_dock.setAllowedAreas(
+            Qt.DockWidgetArea.AllDockWidgetAreas
+        )
+        self.page_thumbnail_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
         self.page_thumbnail_panel = PageThumbnailPanel(self)
         self.page_thumbnail_dock.setWidget(self.page_thumbnail_panel)
         self.addDockWidget(
@@ -3664,7 +5056,10 @@ class MainWindow(QMainWindow):
             self.document_tab_toolbar,
         )
 
-        self.document_tab_bar = QTabBar(self)
+        self.document_tab_bar = TearOffTabBar(
+            self.window_id,
+            self,
+        )
         self.document_tab_bar.setMovable(True)
         self.document_tab_bar.setTabsClosable(True)
         self.document_tab_bar.setExpanding(False)
@@ -3718,6 +5113,12 @@ class MainWindow(QMainWindow):
         )
         self.document_tab_bar.tabCloseRequested.connect(
             self.close_document_tab
+        )
+        self.document_tab_bar.tearOffRequested.connect(
+            self.detach_document_tab
+        )
+        self.document_tab_bar.tabTransferRequested.connect(
+            self.move_document_tab
         )
 
         self.document_tab_bar.setSizePolicy(
@@ -3828,6 +5229,7 @@ class MainWindow(QMainWindow):
             self.current_page = int(
                 session.get("page", 0)
             )
+            self.show_document_workspace()
 
             layout_started = perf_counter()
             self.show_document(
@@ -3951,9 +5353,261 @@ class MainWindow(QMainWindow):
         finally:
             self._switching_document_tab = False
 
+
+    def detach_document_tab(
+        self,
+        index,
+        global_position,
+    ):
+        transfer = self._take_document_tab(
+            int(index)
+        )
+        if transfer is None:
+            return
+
+        session, tab_text = transfer
+
+        detached = MainWindow()
+        detached.setAttribute(
+            Qt.WidgetAttribute.WA_DeleteOnClose,
+            True,
+        )
+        detached._insert_transferred_tab(
+            session,
+            tab_text,
+            0,
+        )
+
+        size = self.size()
+        detached.resize(
+            max(size.width(), 900),
+            max(size.height(), 650),
+        )
+        detached.move(
+            global_position.x() - 80,
+            global_position.y() - 24,
+        )
+        detached.show()
+        detached.raise_()
+        detached.activateWindow()
+
+
+
+    def _take_document_tab(self, index):
+        index = int(index)
+        if (
+            index < 0
+            or index >= len(self._document_tabs)
+        ):
+            return None
+
+        if index == self._active_document_tab:
+            self._capture_active_document_tab()
+
+        session = deepcopy(
+            self._document_tabs[index]
+        )
+        tab_text = self.document_tab_bar.tabText(
+            index
+        )
+
+        self._switching_document_tab = True
+        try:
+            self.document_tab_bar.removeTab(index)
+            self._document_tabs.pop(index)
+        finally:
+            self._switching_document_tab = False
+
+        if not self._document_tabs:
+            self._active_document_tab = -1
+            self.document.close()
+
+            # A transfer is different from closing the final tab with its
+            # close button. Once the last document has moved elsewhere, this
+            # source window is no longer useful and should disappear.
+            #
+            # Defer close() until the transfer signal has returned so the
+            # destination window can finish accepting the session safely.
+            QTimer.singleShot(
+                0,
+                self._close_if_empty_after_transfer,
+            )
+            return session, tab_text
+
+        next_index = min(
+            index,
+            len(self._document_tabs) - 1,
+        )
+        self._active_document_tab = -1
+        self.document_tab_bar.setCurrentIndex(
+            next_index
+        )
+        self.on_document_tab_changed(
+            next_index
+        )
+        return session, tab_text
+
+    def _close_if_empty_after_transfer(self):
+        if self._document_tabs:
+            return
+
+        self.close()
+
+    def _insert_transferred_tab(
+        self,
+        session,
+        tab_text,
+        target_index=None,
+    ):
+        if target_index is None:
+            target_index = len(
+                self._document_tabs
+            )
+
+        target_index = max(
+            0,
+            min(
+                int(target_index),
+                len(self._document_tabs),
+            ),
+        )
+
+        self._capture_active_document_tab()
+
+        self._switching_document_tab = True
+        try:
+            self._document_tabs.insert(
+                target_index,
+                deepcopy(session),
+            )
+            index = self.document_tab_bar.insertTab(
+                target_index,
+                tab_text
+                or Path(session["path"]).name,
+            )
+            self.document_tab_bar.setTabToolTip(
+                index,
+                session["path"],
+            )
+            self.document_tab_bar.setCurrentIndex(
+                index
+            )
+        finally:
+            self._switching_document_tab = False
+
+        self._active_document_tab = -1
+        if self._load_document_session(
+            target_index
+        ):
+            self._active_document_tab = target_index
+            self.document_tab_toolbar.show()
+
+    def move_document_tab(
+        self,
+        source_window_id,
+        source_index,
+        target_index,
+    ):
+        source = WindowRegistry.get(
+            str(source_window_id)
+        )
+        if source is None:
+            return
+
+        source_index = int(source_index)
+        target_index = int(target_index)
+
+        if source is self:
+            self._move_tab_within_window(
+                source_index,
+                target_index,
+            )
+            return
+
+        transfer = source._take_document_tab(
+            source_index
+        )
+        if transfer is None:
+            return
+
+        session, tab_text = transfer
+        self._insert_transferred_tab(
+            session,
+            tab_text,
+            target_index,
+        )
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _move_tab_within_window(
+        self,
+        source_index,
+        target_index,
+    ):
+        count = len(self._document_tabs)
+        if (
+            source_index < 0
+            or source_index >= count
+        ):
+            return
+
+        target_index = max(
+            0,
+            min(target_index, count),
+        )
+        if source_index < target_index:
+            target_index -= 1
+        if source_index == target_index:
+            return
+
+        if source_index == self._active_document_tab:
+            self._capture_active_document_tab()
+
+        session = self._document_tabs.pop(
+            source_index
+        )
+        tab_text = self.document_tab_bar.tabText(
+            source_index
+        )
+        tooltip = self.document_tab_bar.tabToolTip(
+            source_index
+        )
+
+        self._switching_document_tab = True
+        try:
+            self.document_tab_bar.removeTab(
+                source_index
+            )
+            self._document_tabs.insert(
+                target_index,
+                session,
+            )
+            new_index = self.document_tab_bar.insertTab(
+                target_index,
+                tab_text,
+            )
+            self.document_tab_bar.setTabToolTip(
+                new_index,
+                tooltip,
+            )
+            self.document_tab_bar.setCurrentIndex(
+                new_index
+            )
+        finally:
+            self._switching_document_tab = False
+
+        self._active_document_tab = -1
+        self.on_document_tab_changed(
+            target_index
+        )
+
     def close_document_tab(self, index):
         index = int(index)
-        if index < 0 or index >= len(self._document_tabs):
+        if (
+            index < 0
+            or index >= len(self._document_tabs)
+        ):
             return
 
         if index == self._active_document_tab:
@@ -3967,12 +5621,7 @@ class MainWindow(QMainWindow):
             if not self._document_tabs:
                 self._active_document_tab = -1
                 self.document.close()
-                self.view.clear_pending_annotations()
-                self.render_pipeline.invalidate()
-                self.render_manager.clear()
-                self.setWindowTitle("PDFInspector")
-                self.document_tab_toolbar.hide()
-                self.update_toolbar()
+                self.show_home_screen()
                 return
 
             next_index = min(
@@ -3989,6 +5638,7 @@ class MainWindow(QMainWindow):
         self.on_document_tab_changed(
             self.document_tab_bar.currentIndex()
         )
+
 
     def close_all_document_tabs(self):
         self._capture_active_document_tab()
@@ -4214,6 +5864,27 @@ class MainWindow(QMainWindow):
         )
         return settings
 
+    def on_view_annotation_mode_changed(self, mode):
+        action_map = {
+            "hand": self.hand_action,
+            "check": self.check_action,
+            "comment": self.comment_action,
+            "date_stamp": self.date_stamp_action,
+            "arrow": self.arrow_action,
+            "rectangle": self.rectangle_action,
+            "ellipse": self.ellipse_action,
+            "freehand": self.freehand_action,
+            "highlighter": self.highlighter_action,
+            "eraser": self.eraser_action,
+            "cloud": self.cloud_action,
+            "callout": getattr(self, "callout_action", None),
+        }
+        action = action_map.get(mode)
+        if action is not None:
+            action.setChecked(True)
+        elif mode == "hand":
+            self.hand_action.setChecked(True)
+
     def set_annotation_mode(self, mode):
         if mode == "date_stamp":
             self.view.set_date_stamp_preview_settings(
@@ -4264,13 +5935,29 @@ class MainWindow(QMainWindow):
             return
 
         if mode == "comment":
-            text, accepted = QInputDialog.getMultiLineText(
-                self,
-                "コメント追加",
-                "コメント内容:",
+            defaults = deepcopy(
+                self._annotation_defaults.get(
+                    "text",
+                    {},
+                )
             )
-            if not accepted or not text.strip():
+            dialog = CommentCreateDialog(
+                self,
+                defaults,
+            )
+            if (
+                dialog.exec()
+                != QDialog.DialogCode.Accepted
+            ):
                 return
+
+            values = dialog.values()
+            text = values.pop("text")
+
+            self._remember_annotation_defaults(
+                "text",
+                values,
+            )
             self.view.add_text_overlay(
                 page_index,
                 page_point,
@@ -4481,7 +6168,14 @@ class MainWindow(QMainWindow):
                 self.annotation_properties_panel
             )
 
-        self.annotation_properties_toggle.setChecked(True)
+        if hasattr(self, "annotation_properties_toggle"):
+            self.annotation_properties_toggle.setChecked(True)
+        elif hasattr(self, "annotation_properties_dock"):
+            self.annotation_properties_dock.show()
+            self.annotation_properties_dock.raise_()
+        elif hasattr(self, "annotation_layer_dock"):
+            self.annotation_layer_dock.show()
+            self.annotation_layer_dock.raise_()
         self.annotation_properties_dock.raise_()
 
 
@@ -4507,6 +6201,38 @@ class MainWindow(QMainWindow):
                     annotation["y"],
                     annotation["text"],
                     annotation.get("font_size", 11.0),
+                    annotation.get(
+                        "font_family",
+                        "Meiryo",
+                    ),
+                    annotation.get(
+                        "text_color",
+                        "#dc0000",
+                    ),
+                    annotation.get(
+                        "underline",
+                        False,
+                    ),
+                    annotation.get(
+                        "border_enabled",
+                        False,
+                    ),
+                    annotation.get(
+                        "border_color",
+                        "#dc0000",
+                    ),
+                    annotation.get(
+                        "border_width",
+                        1.5,
+                    ),
+                    annotation.get(
+                        "border_padding_x",
+                        2.0,
+                    ),
+                    annotation.get(
+                        "border_padding_y",
+                        1.0,
+                    ),
                 )
             elif annotation["type"] == "date_stamp":
                 self.document.add_date_stamp(
@@ -4556,6 +6282,23 @@ class MainWindow(QMainWindow):
                     annotation.get("fill_enabled", False),
                     annotation.get("fill_opacity", 0.25),
                     annotation.get("fill_color", "#ffff00"),
+                )
+            elif annotation["type"] == "image":
+                page_index = int(
+                    annotation.get("page_index", -1)
+                )
+                if (
+                    self.document.doc is not None
+                    and 0 <= page_index < len(self.document.doc)
+                ):
+                    draw_image_annotation(
+                        self.document.doc[page_index],
+                        annotation,
+                    )
+            elif annotation["type"] in {"stamp", "callout"}:
+                commit_annotation_to_document(
+                    self.document,
+                    annotation,
                 )
             elif annotation["type"] == "cloud":
                 self.document.add_cloud(
@@ -4997,6 +6740,7 @@ class MainWindow(QMainWindow):
 
         self._active_document_tab = index
         self.document_tab_toolbar.show()
+        self._remember_recent_file(path)
         return True
 
 
@@ -5164,6 +6908,29 @@ class MainWindow(QMainWindow):
                 "表示できるPDFページがありません。",
             )
 
+
+
+    def print_document(self):
+        if not self.document.has_document():
+            QMessageBox.information(
+                self,
+                "印刷",
+                "印刷するPDFを開いてください。",
+            )
+            return
+
+        self._capture_active_document_tab()
+        self.view._sync_annotation_records()
+
+        controller = PrintController(
+            parent=self,
+            document=self.document,
+            annotations=self.view._annotation_records,
+            current_page=self.current_page,
+        )
+        controller.run()
+
+
     def save_pdf(self):
         if not self.document.has_document():
             return
@@ -5266,6 +7033,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._capture_active_document_tab()
+        self._save_layout_silently()
         self.render_timer.stop()
         self.visible_tile_timer.stop()
         self.scroll_settle_timer.stop()

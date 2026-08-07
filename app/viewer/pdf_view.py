@@ -1,4 +1,5 @@
 from copy import deepcopy
+from shiboken6 import isValid
 import uuid
 
 from PySide6.QtCore import QPointF, QRectF, QTimer, Signal, Qt
@@ -64,18 +65,149 @@ class CheckAnnotationItem(QGraphicsPathItem):
 
 
 class TextAnnotationItem(QGraphicsTextItem):
+    DEFAULT_PADDING_X = 2.0
+    DEFAULT_PADDING_Y = 1.0
+
     def __init__(self, record):
-        super().__init__(record["text"])
+        super().__init__()
         self.record = record
-        font = QFont()
-        font.setPointSizeF(float(record.get("font_size", 11.0)))
-        self.setFont(font)
-        self.setDefaultTextColor(QColor(220, 0, 0))
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable
             | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
         )
         self.setZValue(20.0)
+        self.refresh_from_record()
+
+    def _text_color(self):
+        color = QColor(
+            str(self.record.get("text_color", "#dc0000"))
+        )
+        return color if color.isValid() else QColor("#dc0000")
+
+    def _border_color(self):
+        color = QColor(
+            str(self.record.get("border_color", "#dc0000"))
+        )
+        return color if color.isValid() else QColor("#dc0000")
+
+    def _content_rect(self):
+        return super().boundingRect()
+
+    def _padding_x(self):
+        return max(
+            float(
+                self.record.get(
+                    "border_padding_x",
+                    self.DEFAULT_PADDING_X,
+                )
+            ),
+            0.0,
+        )
+
+    def _padding_y(self):
+        return max(
+            float(
+                self.record.get(
+                    "border_padding_y",
+                    self.DEFAULT_PADDING_Y,
+                )
+            ),
+            0.0,
+        )
+
+    def boundingRect(self):
+        rect = self._content_rect()
+        if bool(self.record.get("border_enabled", False)):
+            padding_x = self._padding_x()
+            padding_y = self._padding_y()
+            return rect.adjusted(
+                -padding_x,
+                -padding_y,
+                padding_x,
+                padding_y,
+            )
+        return rect
+
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
+
+    def paint(self, painter, option, widget=None):
+        if bool(self.record.get("border_enabled", False)):
+            painter.save()
+            painter.setRenderHint(
+                QPainter.RenderHint.Antialiasing,
+                True,
+            )
+            painter.setPen(
+                QPen(
+                    self._border_color(),
+                    max(
+                        float(
+                            self.record.get(
+                                "border_width",
+                                1.5,
+                            )
+                        ),
+                        0.5,
+                    ),
+                )
+            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            padding_x = self._padding_x()
+            padding_y = self._padding_y()
+            painter.drawRect(
+                self._content_rect().adjusted(
+                    -padding_x,
+                    -padding_y,
+                    padding_x,
+                    padding_y,
+                )
+            )
+            painter.restore()
+
+        super().paint(painter, option, widget)
+
+    def refresh_from_record(self):
+        self.prepareGeometryChange()
+
+        self.setPlainText(
+            str(self.record.get("text", ""))
+        )
+
+        font = QFont(
+            str(
+                self.record.get(
+                    "font_family",
+                    "Meiryo",
+                )
+            )
+        )
+        font.setPointSizeF(
+            max(
+                float(
+                    self.record.get(
+                        "font_size",
+                        11.0,
+                    )
+                ),
+                6.0,
+            )
+        )
+        font.setUnderline(
+            bool(
+                self.record.get(
+                    "underline",
+                    False,
+                )
+            )
+        )
+        self.setFont(font)
+        self.setDefaultTextColor(
+            self._text_color()
+        )
+        self.update()
 
 
 class DateStampItem(QGraphicsObject):
@@ -745,6 +877,7 @@ class FreehandAnnotationItem(QGraphicsPathItem):
 
 class PDFView(GraphicsView):
     page_changed = Signal(int)
+    annotation_mode_changed = Signal(str)
     visible_region_changed = Signal()
     annotation_clicked = Signal(int, QPointF)
     annotation_edit_requested = Signal(object)
@@ -1732,6 +1865,14 @@ class PDFView(GraphicsView):
         return self.annotation_defaults(key)
 
     def _update_pen_cursor(self, viewport_pos=None):
+        # QGraphicsScene.clear() deletes its C++ items immediately. A Python
+        # reference can still remain, so always validate it before use.
+        if (
+            self._pen_cursor_item is not None
+            and not isValid(self._pen_cursor_item)
+        ):
+            self._pen_cursor_item = None
+
         if self.annotation_mode not in {"freehand", "highlighter", "eraser"}:
             if self._pen_cursor_item is not None:
                 self._pen_cursor_item.setVisible(False)
@@ -1744,7 +1885,11 @@ class PDFView(GraphicsView):
             self.scene.addItem(self._pen_cursor_item)
 
         if viewport_pos is None:
-            self._pen_cursor_item.setVisible(False)
+            if (
+                self._pen_cursor_item is not None
+                and isValid(self._pen_cursor_item)
+            ):
+                self._pen_cursor_item.setVisible(False)
             return
 
         point = self.mapToScene(viewport_pos)
@@ -1965,7 +2110,7 @@ class PDFView(GraphicsView):
             self._cancel_freehand()
         if mode != "eraser":
             self._finish_eraser()
-        if mode not in {"hand", "check", "comment", "date_stamp", "arrow", "rectangle", "ellipse", "cloud", "freehand", "highlighter", "eraser"}:
+        if mode not in {"hand", "check", "comment", "date_stamp", "arrow", "rectangle", "ellipse", "cloud", "freehand", "highlighter", "eraser", "stamp", "callout", "balloon", "image"}:
             mode = "hand"
         self.annotation_mode = mode
         cursor = (
@@ -1979,6 +2124,9 @@ class PDFView(GraphicsView):
             else cursor
         )
         self._update_pen_cursor()
+        self.annotation_mode_changed.emit(
+            self.annotation_mode
+        )
 
     def _page_point_at(self, scene_point):
         for page_index, item in self._page_items.items():
@@ -2016,14 +2164,67 @@ class PDFView(GraphicsView):
 
     def add_text_overlay(self, page_index, point, text):
         before = self._history_snapshot()
+        defaults = self.annotation_defaults("text")
         record = {
             "type": "text",
             "page_index": int(page_index),
             "x": float(point.x()),
             "y": float(point.y()),
             "text": str(text).strip(),
-            "font_size": 11.0,
-            "text_color": "#000000",
+            "font_family": str(
+                defaults.get(
+                    "font_family",
+                    "Meiryo",
+                )
+            ),
+            "font_size": float(
+                defaults.get(
+                    "font_size",
+                    11.0,
+                )
+            ),
+            "text_color": str(
+                defaults.get(
+                    "text_color",
+                    "#dc0000",
+                )
+            ),
+            "underline": bool(
+                defaults.get(
+                    "underline",
+                    False,
+                )
+            ),
+            "border_enabled": bool(
+                defaults.get(
+                    "border_enabled",
+                    False,
+                )
+            ),
+            "border_color": str(
+                defaults.get(
+                    "border_color",
+                    "#dc0000",
+                )
+            ),
+            "border_width": float(
+                defaults.get(
+                    "border_width",
+                    1.5,
+                )
+            ),
+            "border_padding_x": float(
+                defaults.get(
+                    "border_padding_x",
+                    2.0,
+                )
+            ),
+            "border_padding_y": float(
+                defaults.get(
+                    "border_padding_y",
+                    1.0,
+                )
+            ),
         }
         if not record["text"]:
             return
@@ -3232,6 +3433,36 @@ class PDFView(GraphicsView):
 
         return False
 
+    def handle_escape(self):
+        """First Escape clears selection; second returns to hand mode."""
+        self.finish_property_edit()
+
+        if self._date_stamp_preview_item is not None:
+            self._remove_date_stamp_preview()
+            return True
+
+        if self._cancel_freehand():
+            return True
+
+        if self._cancel_shape_drawing():
+            return True
+
+        if self._cancel_arrow_drawing():
+            return True
+
+        if self._cancel_active_gesture():
+            self.clear_annotation_selection()
+            return True
+
+        if self.clear_annotation_selection():
+            return True
+
+        if self.annotation_mode != "hand":
+            self.set_annotation_mode("hand")
+            return True
+
+        return False
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             if self.cancel_current_operation():
@@ -3275,7 +3506,12 @@ class PDFView(GraphicsView):
         self._sync_annotation_records()
         self._annotation_items.clear()
         self._detach_selection_overlay()
+
+        # The scene owns and deletes the pen cursor item. Drop the Python
+        # reference before clearing so later mouse moves recreate it safely.
+        self._pen_cursor_item = None
         self.scene.clear()
+
         self._reattach_selection_overlay()
         self.page_manager.clear()
         self._page_items.clear()

@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
-    QFontComboBox,
     QFormLayout,
     QLabel,
     QLineEdit,
@@ -53,17 +52,9 @@ from app.pdf.render_pipeline import RenderPipeline
 from app.pdf.render_manager import RenderManager
 from app.pdf.renderer import PDFRenderer
 from app.viewer.pdf_view import PDFView
-from app.annotations.image_annotation import (
-    draw_image_annotation,
-    install_image_annotation,
-)
 from app.annotations.stamp_callout import (
     commit_annotation_to_document,
     install_stamp_callout,
-)
-from app.annotations.balloon_annotation import (
-    draw_balloon_annotation,
-    install_balloon_annotation,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from app.application.window_registry import WindowRegistry
@@ -77,282 +68,6 @@ def _set_color_button(button, color):
     fg = "#000000" if color.lightness() > 145 else "#ffffff"
     button.setText(name.upper())
     button.setStyleSheet(f"QPushButton {{background-color: {name}; color: {fg}; padding: 5px 12px;}}")
-
-
-class CommentCreateDialog(QDialog):
-    def __init__(self, parent, defaults):
-        super().__init__(parent)
-        self.setWindowTitle("コメント追加")
-        self.resize(520, 560)
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.text_edit = QTextEdit(self)
-        self.text_edit.setMinimumHeight(150)
-        self.text_edit.setPlaceholderText(
-            "コメント内容を入力してください"
-        )
-        form.addRow("コメント:", self.text_edit)
-
-        self.font_combo = QFontComboBox(self)
-        self.font_combo.setCurrentFont(
-            QFont(
-                str(
-                    defaults.get(
-                        "font_family",
-                        "Meiryo",
-                    )
-                )
-            )
-        )
-        form.addRow("フォント:", self.font_combo)
-
-        self.font_size_spin = QDoubleSpinBox(self)
-        self.font_size_spin.setRange(6.0, 144.0)
-        self.font_size_spin.setDecimals(1)
-        self.font_size_spin.setSingleStep(1.0)
-        self.font_size_spin.setSuffix(" pt")
-        self.font_size_spin.setValue(
-            max(
-                float(
-                    defaults.get(
-                        "font_size",
-                        11.0,
-                    )
-                ),
-                6.0,
-            )
-        )
-        form.addRow("文字サイズ:", self.font_size_spin)
-
-        self._text_color = QColor(
-            str(
-                defaults.get(
-                    "text_color",
-                    "#dc0000",
-                )
-            )
-        )
-        if not self._text_color.isValid():
-            self._text_color = QColor("#dc0000")
-
-        self.text_color_button = QPushButton(self)
-        self.text_color_button.clicked.connect(
-            self._choose_text_color
-        )
-        _set_color_button(
-            self.text_color_button,
-            self._text_color,
-        )
-        form.addRow("文字色:", self.text_color_button)
-
-        self.underline_check = QCheckBox(
-            "文字に下線を付ける",
-            self,
-        )
-        self.underline_check.setChecked(
-            bool(
-                defaults.get(
-                    "underline",
-                    False,
-                )
-            )
-        )
-        form.addRow("装飾:", self.underline_check)
-
-        self.border_check = QCheckBox(
-            "文字を枠で囲む",
-            self,
-        )
-        self.border_check.setChecked(
-            bool(
-                defaults.get(
-                    "border_enabled",
-                    False,
-                )
-            )
-        )
-        form.addRow("枠:", self.border_check)
-
-        self._border_color = QColor(
-            str(
-                defaults.get(
-                    "border_color",
-                    "#dc0000",
-                )
-            )
-        )
-        if not self._border_color.isValid():
-            self._border_color = QColor("#dc0000")
-
-        self.border_color_button = QPushButton(self)
-        self.border_color_button.clicked.connect(
-            self._choose_border_color
-        )
-        _set_color_button(
-            self.border_color_button,
-            self._border_color,
-        )
-        form.addRow(
-            "枠線色:",
-            self.border_color_button,
-        )
-
-        self.border_width_spin = QDoubleSpinBox(self)
-        self.border_width_spin.setRange(0.5, 20.0)
-        self.border_width_spin.setDecimals(1)
-        self.border_width_spin.setSingleStep(0.5)
-        self.border_width_spin.setSuffix(" pt")
-        self.border_width_spin.setValue(
-            max(
-                float(
-                    defaults.get(
-                        "border_width",
-                        1.5,
-                    )
-                ),
-                0.5,
-            )
-        )
-        form.addRow(
-            "枠線太さ:",
-            self.border_width_spin,
-        )
-
-        self.border_padding_x_spin = QDoubleSpinBox(self)
-        self.border_padding_x_spin.setRange(0.0, 20.0)
-        self.border_padding_x_spin.setDecimals(1)
-        self.border_padding_x_spin.setSingleStep(0.5)
-        self.border_padding_x_spin.setSuffix(" px")
-        self.border_padding_x_spin.setValue(
-            max(
-                float(
-                    defaults.get(
-                        "border_padding_x",
-                        2.0,
-                    )
-                ),
-                0.0,
-            )
-        )
-        form.addRow(
-            "左右余白:",
-            self.border_padding_x_spin,
-        )
-
-        self.border_padding_y_spin = QDoubleSpinBox(self)
-        self.border_padding_y_spin.setRange(0.0, 20.0)
-        self.border_padding_y_spin.setDecimals(1)
-        self.border_padding_y_spin.setSingleStep(0.5)
-        self.border_padding_y_spin.setSuffix(" px")
-        self.border_padding_y_spin.setValue(
-            max(
-                float(
-                    defaults.get(
-                        "border_padding_y",
-                        1.0,
-                    )
-                ),
-                0.0,
-            )
-        )
-        form.addRow(
-            "上下余白:",
-            self.border_padding_y_spin,
-        )
-
-        layout.addLayout(form)
-
-        note = QLabel(
-            "ここで設定した内容は、配置後の右側プロパティでも"
-            "変更できます。次回のコメントにも引き継がれます。",
-            self,
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel,
-            self,
-        )
-        buttons.accepted.connect(self._accept_if_valid)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-        self.text_edit.setFocus()
-
-    def _choose_text_color(self):
-        color = QColorDialog.getColor(
-            self._text_color,
-            self,
-            "文字色を選択",
-        )
-        if color.isValid():
-            color.setAlpha(255)
-            self._text_color = color
-            _set_color_button(
-                self.text_color_button,
-                color,
-            )
-
-    def _choose_border_color(self):
-        color = QColorDialog.getColor(
-            self._border_color,
-            self,
-            "枠線色を選択",
-        )
-        if color.isValid():
-            color.setAlpha(255)
-            self._border_color = color
-            _set_color_button(
-                self.border_color_button,
-                color,
-            )
-
-    def _accept_if_valid(self):
-        if not self.text_edit.toPlainText().strip():
-            QMessageBox.information(
-                self,
-                "コメント追加",
-                "コメント内容を入力してください。",
-            )
-            self.text_edit.setFocus()
-            return
-        self.accept()
-
-    def values(self):
-        return {
-            "text": self.text_edit.toPlainText().strip(),
-            "font_family": (
-                self.font_combo.currentFont().family()
-            ),
-            "font_size": (
-                self.font_size_spin.value()
-            ),
-            "text_color": self._text_color.name(
-                QColor.NameFormat.HexRgb
-            ),
-            "underline": (
-                self.underline_check.isChecked()
-            ),
-            "border_enabled": (
-                self.border_check.isChecked()
-            ),
-            "border_color": self._border_color.name(
-                QColor.NameFormat.HexRgb
-            ),
-            "border_width": (
-                self.border_width_spin.value()
-            ),
-            "border_padding_x": (
-                self.border_padding_x_spin.value()
-            ),
-            "border_padding_y": (
-                self.border_padding_y_spin.value()
-            ),
-        }
 
 
 class LinePropertiesDialog(QDialog):
@@ -549,9 +264,6 @@ class AnnotationPropertiesPanel(QWidget):
         "ellipse": "円・楕円",
         "cloud": "クラウド",
         "freehand": "手書き",
-        "stamp": "スタンプ",
-        "callout": "吹き出し",
-        "balloon": "バルーン",
     }
 
     def __init__(self, main_window):
@@ -779,259 +491,8 @@ class AnnotationPropertiesPanel(QWidget):
         elif record_type == "text":
             self.text_edit = QTextEdit(self)
             self.text_edit.setMaximumHeight(140)
-            self.text_edit.setPlainText(
-                str(record.get("text", ""))
-            )
-            self.form_layout.addRow(
-                "コメント:",
-                self.text_edit,
-            )
-
-            self.font_combo = QFontComboBox(self)
-            self.font_combo.setCurrentFont(
-                QFont(
-                    str(
-                        record.get(
-                            "font_family",
-                            "Meiryo",
-                        )
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "フォント:",
-                self.font_combo,
-            )
-
-            self.font_size_spin = self._add_double(
-                "文字サイズ",
-                record.get("font_size", 11.0),
-                6.0,
-                144.0,
-                1.0,
-                " pt",
-            )
-
-            self._add_color(
-                "text_color",
-                "文字色",
-                record.get(
-                    "text_color",
-                    "#dc0000",
-                ),
-            )
-
-            self.underline_check = QCheckBox(
-                "文字に下線を付ける",
-                self,
-            )
-            self.underline_check.setChecked(
-                bool(
-                    record.get(
-                        "underline",
-                        False,
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "装飾:",
-                self.underline_check,
-            )
-
-            self.border_check = QCheckBox(
-                "文字を枠で囲む",
-                self,
-            )
-            self.border_check.setChecked(
-                bool(
-                    record.get(
-                        "border_enabled",
-                        False,
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "枠:",
-                self.border_check,
-            )
-
-            self._add_color(
-                "comment_border_color",
-                "枠線色",
-                record.get(
-                    "border_color",
-                    "#dc0000",
-                ),
-            )
-
-            self.border_width_spin = self._add_double(
-                "枠線太さ",
-                record.get("border_width", 1.5),
-                0.5,
-                20.0,
-                0.5,
-                " pt",
-            )
-
-            self.border_padding_x_spin = self._add_double(
-                "左右余白",
-                record.get("border_padding_x", 2.0),
-                0.0,
-                20.0,
-                0.5,
-                " px",
-            )
-            self.border_padding_y_spin = self._add_double(
-                "上下余白",
-                record.get("border_padding_y", 1.0),
-                0.0,
-                20.0,
-                0.5,
-                " px",
-            )
-
-        elif record_type == "stamp":
-            self.text_edit = QTextEdit(self)
-            self.text_edit.setMaximumHeight(90)
             self.text_edit.setPlainText(str(record.get("text", "")))
-            self.form_layout.addRow("文字:", self.text_edit)
-            self._add_color("color", "色", record.get("color", "#d00000"))
-            self.width_spin = self._add_double("幅", record.get("width", 92.0), 30.0, 1000.0, 1.0, " pt")
-            self.height_spin = self._add_double("高さ", record.get("height", 34.0), 20.0, 500.0, 1.0, " pt")
-            self.font_size_spin = self._add_double("文字サイズ", record.get("font_size", 14.0), 6.0, 144.0, 1.0, " pt")
-            self.line_width_spin = self._add_double("枠線太さ", record.get("line_width", 2.5), 0.5, 20.0, 0.5, " pt")
-
-        elif record_type == "callout":
-            self.text_edit = QTextEdit(self)
-            self.text_edit.setMaximumHeight(110)
-            self.text_edit.setPlainText(str(record.get("text", "")))
-            self.form_layout.addRow("文字:", self.text_edit)
-            self._add_color("border_color", "枠線色", record.get("color", "#d00000"))
-            self._add_color("arrow_color", "矢印色", record.get("arrow_color", record.get("color", "#d00000")))
-            self._add_color("fill_color", "背景色", record.get("fill_color", "#fff8c6"))
-            self._add_color("text_color", "文字色", record.get("text_color", "#000000"))
-            self.line_width_spin = self._add_double("線の太さ", record.get("line_width", 2.0), 0.5, 20.0, 0.5, " pt")
-            self.corner_radius_spin = self._add_double("角の丸み", record.get("corner_radius", 10.0), 0.0, 80.0, 1.0, " pt")
-            self.font_size_spin = self._add_double("文字サイズ", record.get("font_size", 11.0), 6.0, 72.0, 1.0, " pt")
-            self.width_spin = self._add_double("幅", record.get("width", 180.0), 90.0, 3000.0, 1.0, " pt")
-            self.height_spin = self._add_double("高さ", record.get("height", 74.0), 46.0, 3000.0, 1.0, " pt")
-            self.opacity_spin = self._add_double("背景の濃さ", float(record.get("fill_opacity", 0.72)) * 100.0, 0.0, 100.0, 5.0, " %")
-
-        elif record_type == "balloon":
-            self.text_edit = QTextEdit(self)
-            self.text_edit.setMaximumHeight(75)
-            self.text_edit.setPlainText(
-                str(
-                    record.get(
-                        "text",
-                        "1",
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "表示文字:",
-                self.text_edit,
-            )
-
-            self._add_color(
-                "balloon_border_color",
-                "枠線色",
-                record.get(
-                    "color",
-                    "#d00000",
-                ),
-            )
-            self._add_color(
-                "balloon_fill_color",
-                "背景色",
-                record.get(
-                    "fill_color",
-                    "#ffffff",
-                ),
-            )
-            self._add_color(
-                "balloon_text_color",
-                "文字色",
-                record.get(
-                    "text_color",
-                    "#d00000",
-                ),
-            )
-            self._add_color(
-                "balloon_arrow_color",
-                "引出線色",
-                record.get(
-                    "arrow_color",
-                    record.get(
-                        "color",
-                        "#d00000",
-                    ),
-                ),
-            )
-
-            self.arrow_enabled_check = QCheckBox(
-                "引出線と矢印を表示",
-                self,
-            )
-            self.arrow_enabled_check.setChecked(
-                bool(
-                    record.get(
-                        "arrow_enabled",
-                        True,
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "引出線:",
-                self.arrow_enabled_check,
-            )
-
-            self.width_spin = self._add_double(
-                "幅",
-                record.get("width", 52.0),
-                28.0,
-                600.0,
-                1.0,
-                " pt",
-            )
-            self.height_spin = self._add_double(
-                "高さ",
-                record.get("height", 52.0),
-                28.0,
-                600.0,
-                1.0,
-                " pt",
-            )
-            self.font_size_spin = self._add_double(
-                "文字サイズ",
-                record.get("font_size", 16.0),
-                6.0,
-                96.0,
-                1.0,
-                " pt",
-            )
-            self.line_width_spin = self._add_double(
-                "線の太さ",
-                record.get("line_width", 2.0),
-                0.5,
-                20.0,
-                0.5,
-                " pt",
-            )
-            self.opacity_spin = self._add_double(
-                "背景の濃さ",
-                float(
-                    record.get(
-                        "fill_opacity",
-                        1.0,
-                    )
-                )
-                * 100.0,
-                0.0,
-                100.0,
-                5.0,
-                " %",
-            )
+            self.form_layout.addRow("コメント:", self.text_edit)
 
         elif record_type == "date_stamp":
             self.top_edit = QLineEdit(
@@ -1110,68 +571,6 @@ class AnnotationPropertiesPanel(QWidget):
                 self._schedule_text_apply
             )
 
-        if record_type == "text":
-            self.font_combo.currentFontChanged.connect(
-                self._apply_numeric_change
-            )
-            self.font_size_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.underline_check.toggled.connect(
-                self._apply_numeric_change
-            )
-            self.border_check.toggled.connect(
-                self._apply_numeric_change
-            )
-            self.border_width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.border_padding_x_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.border_padding_y_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-
-        if record_type == "stamp":
-            self.text_edit.textChanged.connect(self._schedule_text_apply)
-            self.width_spin.valueChanged.connect(self._apply_numeric_change)
-            self.height_spin.valueChanged.connect(self._apply_numeric_change)
-            self.font_size_spin.valueChanged.connect(self._apply_numeric_change)
-            self.line_width_spin.valueChanged.connect(self._apply_numeric_change)
-
-        if record_type == "callout":
-            self.text_edit.textChanged.connect(self._schedule_text_apply)
-            self.line_width_spin.valueChanged.connect(self._apply_numeric_change)
-            self.corner_radius_spin.valueChanged.connect(self._apply_numeric_change)
-            self.font_size_spin.valueChanged.connect(self._apply_numeric_change)
-            self.width_spin.valueChanged.connect(self._apply_numeric_change)
-            self.height_spin.valueChanged.connect(self._apply_numeric_change)
-            self.opacity_spin.valueChanged.connect(self._apply_numeric_change)
-
-        if record_type == "balloon":
-            self.text_edit.textChanged.connect(
-                self._schedule_text_apply
-            )
-            self.arrow_enabled_check.toggled.connect(
-                self._apply_numeric_change
-            )
-            self.width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.height_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.font_size_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.line_width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.opacity_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-
         if record_type == "date_stamp":
             self.top_edit.textChanged.connect(
                 self._schedule_text_apply
@@ -1218,34 +617,6 @@ class AnnotationPropertiesPanel(QWidget):
                     self.width_spin.setValue(width)
                 if abs(self.height_spin.value() - height) > 0.05:
                     self.height_spin.setValue(height)
-
-            elif record_type == "balloon":
-                width = float(
-                    self.record.get(
-                        "width",
-                        52.0,
-                    )
-                )
-                height = float(
-                    self.record.get(
-                        "height",
-                        52.0,
-                    )
-                )
-                if abs(
-                    self.width_spin.value()
-                    - width
-                ) > 0.05:
-                    self.width_spin.setValue(
-                        width
-                    )
-                if abs(
-                    self.height_spin.value()
-                    - height
-                ) > 0.05:
-                    self.height_spin.setValue(
-                        height
-                    )
 
             elif record_type == "date_stamp" and hasattr(self, "size_spin"):
                 value = float(self.record.get("size", 72.0))
@@ -1430,201 +801,11 @@ class AnnotationPropertiesPanel(QWidget):
             )
 
         elif record_type == "text":
+            text = self.text_edit.toPlainText().strip()
             before = view._history_snapshot()
-
-            values = {
-                "text": (
-                    self.text_edit.toPlainText().strip()
-                ),
-                "font_family": (
-                    self.font_combo.currentFont().family()
-                ),
-                "font_size": (
-                    self.font_size_spin.value()
-                ),
-                "text_color": self._color_name(
-                    "text_color",
-                    "#dc0000",
-                ),
-                "underline": (
-                    self.underline_check.isChecked()
-                ),
-                "border_enabled": (
-                    self.border_check.isChecked()
-                ),
-                "border_color": self._color_name(
-                    "comment_border_color",
-                    "#dc0000",
-                ),
-                "border_width": (
-                    self.border_width_spin.value()
-                ),
-                "border_padding_x": (
-                    self.border_padding_x_spin.value()
-                ),
-                "border_padding_y": (
-                    self.border_padding_y_spin.value()
-                ),
-            }
-            record.update(values)
-
-            if hasattr(
-                item,
-                "refresh_from_record",
-            ):
-                item.refresh_from_record()
-            else:
-                item.setPlainText(
-                    values["text"]
-                )
-                item.update()
-
-            view._refresh_selection_overlay()
+            record["text"] = text
+            item.setPlainText(text)
             view._commit_history_change(before)
-
-            self.main_window._remember_annotation_defaults(
-                "text",
-                {
-                    key: value
-                    for key, value in values.items()
-                    if key != "text"
-                },
-            )
-
-        elif record_type == "stamp":
-            before = view._history_snapshot()
-            record["text"] = self.text_edit.toPlainText().strip()
-            record["color"] = self._color_name("color", "#d00000")
-            record["width"] = self.width_spin.value()
-            record["height"] = self.height_spin.value()
-            record["font_size"] = self.font_size_spin.value()
-            record["line_width"] = self.line_width_spin.value()
-            if hasattr(item, "refresh_from_record"):
-                item.refresh_from_record()
-            else:
-                item.update()
-            view._refresh_selection_overlay()
-            view._commit_history_change(before)
-
-        elif record_type == "callout":
-            before = view._history_snapshot()
-            record["text"] = self.text_edit.toPlainText().strip()
-            record["color"] = self._color_name("border_color", "#d00000")
-            record["arrow_color"] = self._color_name("arrow_color", record["color"])
-            record["fill_color"] = self._color_name("fill_color", "#fff8c6")
-            record["text_color"] = self._color_name("text_color", "#000000")
-            record["line_width"] = self.line_width_spin.value()
-            record["corner_radius"] = self.corner_radius_spin.value()
-            record["font_size"] = self.font_size_spin.value()
-            record["width"] = self.width_spin.value()
-            record["height"] = self.height_spin.value()
-            record["fill_opacity"] = self.opacity_spin.value() / 100.0
-            if hasattr(item, "refresh_from_record"):
-                item.refresh_from_record()
-            else:
-                item.update()
-            view._refresh_selection_overlay()
-            view._commit_history_change(before)
-
-            self.main_window._remember_annotation_defaults(
-                "callout",
-                {
-                    "color": record["color"],
-                    "arrow_color": record["arrow_color"],
-                    "fill_color": record["fill_color"],
-                    "text_color": record["text_color"],
-                    "line_width": record["line_width"],
-                    "corner_radius": record["corner_radius"],
-                    "font_size": record["font_size"],
-                    "width": record["width"],
-                    "height": record["height"],
-                    "fill_opacity": record["fill_opacity"],
-                },
-            )
-
-        elif record_type == "balloon":
-            before = view._history_snapshot()
-
-            record["text"] = (
-                self.text_edit.toPlainText().strip()
-                or "1"
-            )
-            record["color"] = self._color_name(
-                "balloon_border_color",
-                "#d00000",
-            )
-            record["fill_color"] = self._color_name(
-                "balloon_fill_color",
-                "#ffffff",
-            )
-            record["text_color"] = self._color_name(
-                "balloon_text_color",
-                "#d00000",
-            )
-            record["arrow_color"] = self._color_name(
-                "balloon_arrow_color",
-                record["color"],
-            )
-            record["arrow_enabled"] = (
-                self.arrow_enabled_check.isChecked()
-            )
-            record["width"] = (
-                self.width_spin.value()
-            )
-            record["height"] = (
-                self.height_spin.value()
-            )
-            record["font_size"] = (
-                self.font_size_spin.value()
-            )
-            record["line_width"] = (
-                self.line_width_spin.value()
-            )
-            record["fill_opacity"] = (
-                self.opacity_spin.value()
-                / 100.0
-            )
-
-            if hasattr(
-                item,
-                "refresh_from_record",
-            ):
-                item.refresh_from_record()
-            else:
-                item.update()
-
-            view._refresh_selection_overlay()
-            view._commit_history_change(before)
-
-            self.main_window._remember_annotation_defaults(
-                "balloon",
-                {
-                    "color": record["color"],
-                    "fill_color": (
-                        record["fill_color"]
-                    ),
-                    "text_color": (
-                        record["text_color"]
-                    ),
-                    "arrow_color": (
-                        record["arrow_color"]
-                    ),
-                    "arrow_enabled": (
-                        record["arrow_enabled"]
-                    ),
-                    "width": record["width"],
-                    "height": record["height"],
-                    "font_size": (
-                        record["font_size"]
-                    ),
-                    "line_width": (
-                        record["line_width"]
-                    ),
-                    "fill_opacity": (
-                        record["fill_opacity"]
-                    ),
-                },
-            )
 
         elif record_type == "date_stamp":
             before = view._history_snapshot()
@@ -3181,9 +2362,6 @@ class MainWindow(QMainWindow):
         self.view.selection_count_changed.connect(
             self.on_selection_count_changed
         )
-        self.view.annotation_mode_changed.connect(
-            self.on_view_annotation_mode_changed
-        )
         self.central_stack = QStackedWidget(self)
         self.home_widget = self._create_home_widget()
         self.central_stack.addWidget(
@@ -3254,9 +2432,7 @@ class MainWindow(QMainWindow):
         self.visible_tile_timer.timeout.connect(self.render_visible_tiles)
 
         self.create_toolbar()
-        install_image_annotation(self)
         install_stamp_callout(self)
-        install_balloon_annotation(self)
         self.create_document_tab_bar()
         self.create_page_thumbnail_panel()
         self.create_date_stamp_panel()
@@ -3330,30 +2506,6 @@ class MainWindow(QMainWindow):
                 "fill_opacity": 0.25,
                 "fill_color": "#ffff00",
                 "font_size": 11.0,
-            },
-            "callout": {
-                "color": "#d00000",
-                "arrow_color": "#d00000",
-                "fill_color": "#fff8c6",
-                "text_color": "#000000",
-                "line_width": 2.0,
-                "corner_radius": 10.0,
-                "font_size": 11.0,
-                "fill_opacity": 0.72,
-                "width": 180.0,
-                "height": 74.0,
-            },
-            "balloon": {
-                "color": "#d00000",
-                "arrow_color": "#d00000",
-                "fill_color": "#ffffff",
-                "text_color": "#d00000",
-                "line_width": 2.0,
-                "font_size": 16.0,
-                "fill_opacity": 1.0,
-                "arrow_enabled": True,
-                "width": 52.0,
-                "height": 52.0,
             },
         }
 
@@ -3583,7 +2735,7 @@ class MainWindow(QMainWindow):
         )
         self.clear_selection_action.setShortcut("Esc")
         self.clear_selection_action.triggered.connect(
-            self.view.handle_escape
+            self.view.cancel_current_operation
         )
 
         self.select_all_action = QAction("すべて選択", self)
@@ -6164,27 +5316,6 @@ class MainWindow(QMainWindow):
         )
         return settings
 
-    def on_view_annotation_mode_changed(self, mode):
-        action_map = {
-            "hand": self.hand_action,
-            "check": self.check_action,
-            "comment": self.comment_action,
-            "date_stamp": self.date_stamp_action,
-            "arrow": self.arrow_action,
-            "rectangle": self.rectangle_action,
-            "ellipse": self.ellipse_action,
-            "freehand": self.freehand_action,
-            "highlighter": self.highlighter_action,
-            "eraser": self.eraser_action,
-            "cloud": self.cloud_action,
-            "callout": getattr(self, "callout_action", None),
-        }
-        action = action_map.get(mode)
-        if action is not None:
-            action.setChecked(True)
-        elif mode == "hand":
-            self.hand_action.setChecked(True)
-
     def set_annotation_mode(self, mode):
         if mode == "date_stamp":
             self.view.set_date_stamp_preview_settings(
@@ -6235,29 +5366,13 @@ class MainWindow(QMainWindow):
             return
 
         if mode == "comment":
-            defaults = deepcopy(
-                self._annotation_defaults.get(
-                    "text",
-                    {},
-                )
-            )
-            dialog = CommentCreateDialog(
+            text, accepted = QInputDialog.getMultiLineText(
                 self,
-                defaults,
+                "コメント追加",
+                "コメント内容:",
             )
-            if (
-                dialog.exec()
-                != QDialog.DialogCode.Accepted
-            ):
+            if not accepted or not text.strip():
                 return
-
-            values = dialog.values()
-            text = values.pop("text")
-
-            self._remember_annotation_defaults(
-                "text",
-                values,
-            )
             self.view.add_text_overlay(
                 page_index,
                 page_point,
@@ -6501,38 +5616,6 @@ class MainWindow(QMainWindow):
                     annotation["y"],
                     annotation["text"],
                     annotation.get("font_size", 11.0),
-                    annotation.get(
-                        "font_family",
-                        "Meiryo",
-                    ),
-                    annotation.get(
-                        "text_color",
-                        "#dc0000",
-                    ),
-                    annotation.get(
-                        "underline",
-                        False,
-                    ),
-                    annotation.get(
-                        "border_enabled",
-                        False,
-                    ),
-                    annotation.get(
-                        "border_color",
-                        "#dc0000",
-                    ),
-                    annotation.get(
-                        "border_width",
-                        1.5,
-                    ),
-                    annotation.get(
-                        "border_padding_x",
-                        2.0,
-                    ),
-                    annotation.get(
-                        "border_padding_y",
-                        1.0,
-                    ),
                 )
             elif annotation["type"] == "date_stamp":
                 self.document.add_date_stamp(
@@ -6583,35 +5666,11 @@ class MainWindow(QMainWindow):
                     annotation.get("fill_opacity", 0.25),
                     annotation.get("fill_color", "#ffff00"),
                 )
-            elif annotation["type"] == "image":
-                page_index = int(
-                    annotation.get("page_index", -1)
-                )
-                if (
-                    self.document.doc is not None
-                    and 0 <= page_index < len(self.document.doc)
-                ):
-                    draw_image_annotation(
-                        self.document.doc[page_index],
-                        annotation,
-                    )
             elif annotation["type"] in {"stamp", "callout"}:
                 commit_annotation_to_document(
                     self.document,
                     annotation,
                 )
-            elif annotation["type"] == "balloon":
-                page_index = int(
-                    annotation.get("page_index", -1)
-                )
-                if (
-                    self.document.doc is not None
-                    and 0 <= page_index < len(self.document.doc)
-                ):
-                    draw_balloon_annotation(
-                        self.document.doc[page_index],
-                        annotation,
-                    )
             elif annotation["type"] == "cloud":
                 self.document.add_cloud(
                     annotation["page_index"],

@@ -551,7 +551,6 @@ class AnnotationPropertiesPanel(QWidget):
         "freehand": "手書き",
         "stamp": "スタンプ",
         "callout": "吹き出し",
-        "balloon": "バルーン",
     }
 
     def __init__(self, main_window):
@@ -911,127 +910,10 @@ class AnnotationPropertiesPanel(QWidget):
             self._add_color("fill_color", "背景色", record.get("fill_color", "#fff8c6"))
             self._add_color("text_color", "文字色", record.get("text_color", "#000000"))
             self.line_width_spin = self._add_double("線の太さ", record.get("line_width", 2.0), 0.5, 20.0, 0.5, " pt")
-            self.corner_radius_spin = self._add_double("角の丸み", record.get("corner_radius", 10.0), 0.0, 80.0, 1.0, " pt")
             self.font_size_spin = self._add_double("文字サイズ", record.get("font_size", 11.0), 6.0, 72.0, 1.0, " pt")
             self.width_spin = self._add_double("幅", record.get("width", 180.0), 90.0, 3000.0, 1.0, " pt")
             self.height_spin = self._add_double("高さ", record.get("height", 74.0), 46.0, 3000.0, 1.0, " pt")
             self.opacity_spin = self._add_double("背景の濃さ", float(record.get("fill_opacity", 0.72)) * 100.0, 0.0, 100.0, 5.0, " %")
-
-        elif record_type == "balloon":
-            self.text_edit = QTextEdit(self)
-            self.text_edit.setMaximumHeight(75)
-            self.text_edit.setPlainText(
-                str(
-                    record.get(
-                        "text",
-                        "1",
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "表示文字:",
-                self.text_edit,
-            )
-
-            self._add_color(
-                "balloon_border_color",
-                "枠線色",
-                record.get(
-                    "color",
-                    "#d00000",
-                ),
-            )
-            self._add_color(
-                "balloon_fill_color",
-                "背景色",
-                record.get(
-                    "fill_color",
-                    "#ffffff",
-                ),
-            )
-            self._add_color(
-                "balloon_text_color",
-                "文字色",
-                record.get(
-                    "text_color",
-                    "#d00000",
-                ),
-            )
-            self._add_color(
-                "balloon_arrow_color",
-                "引出線色",
-                record.get(
-                    "arrow_color",
-                    record.get(
-                        "color",
-                        "#d00000",
-                    ),
-                ),
-            )
-
-            self.arrow_enabled_check = QCheckBox(
-                "引出線と矢印を表示",
-                self,
-            )
-            self.arrow_enabled_check.setChecked(
-                bool(
-                    record.get(
-                        "arrow_enabled",
-                        True,
-                    )
-                )
-            )
-            self.form_layout.addRow(
-                "引出線:",
-                self.arrow_enabled_check,
-            )
-
-            self.width_spin = self._add_double(
-                "幅",
-                record.get("width", 52.0),
-                28.0,
-                600.0,
-                1.0,
-                " pt",
-            )
-            self.height_spin = self._add_double(
-                "高さ",
-                record.get("height", 52.0),
-                28.0,
-                600.0,
-                1.0,
-                " pt",
-            )
-            self.font_size_spin = self._add_double(
-                "文字サイズ",
-                record.get("font_size", 16.0),
-                6.0,
-                96.0,
-                1.0,
-                " pt",
-            )
-            self.line_width_spin = self._add_double(
-                "線の太さ",
-                record.get("line_width", 2.0),
-                0.5,
-                20.0,
-                0.5,
-                " pt",
-            )
-            self.opacity_spin = self._add_double(
-                "背景の濃さ",
-                float(
-                    record.get(
-                        "fill_opacity",
-                        1.0,
-                    )
-                )
-                * 100.0,
-                0.0,
-                100.0,
-                5.0,
-                " %",
-            )
 
         elif record_type == "date_stamp":
             self.top_edit = QLineEdit(
@@ -1143,34 +1025,10 @@ class AnnotationPropertiesPanel(QWidget):
         if record_type == "callout":
             self.text_edit.textChanged.connect(self._schedule_text_apply)
             self.line_width_spin.valueChanged.connect(self._apply_numeric_change)
-            self.corner_radius_spin.valueChanged.connect(self._apply_numeric_change)
             self.font_size_spin.valueChanged.connect(self._apply_numeric_change)
             self.width_spin.valueChanged.connect(self._apply_numeric_change)
             self.height_spin.valueChanged.connect(self._apply_numeric_change)
             self.opacity_spin.valueChanged.connect(self._apply_numeric_change)
-
-        if record_type == "balloon":
-            self.text_edit.textChanged.connect(
-                self._schedule_text_apply
-            )
-            self.arrow_enabled_check.toggled.connect(
-                self._apply_numeric_change
-            )
-            self.width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.height_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.font_size_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.line_width_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
-            self.opacity_spin.valueChanged.connect(
-                self._apply_numeric_change
-            )
 
         if record_type == "date_stamp":
             self.top_edit.textChanged.connect(
@@ -1218,34 +1076,6 @@ class AnnotationPropertiesPanel(QWidget):
                     self.width_spin.setValue(width)
                 if abs(self.height_spin.value() - height) > 0.05:
                     self.height_spin.setValue(height)
-
-            elif record_type == "balloon":
-                width = float(
-                    self.record.get(
-                        "width",
-                        52.0,
-                    )
-                )
-                height = float(
-                    self.record.get(
-                        "height",
-                        52.0,
-                    )
-                )
-                if abs(
-                    self.width_spin.value()
-                    - width
-                ) > 0.05:
-                    self.width_spin.setValue(
-                        width
-                    )
-                if abs(
-                    self.height_spin.value()
-                    - height
-                ) > 0.05:
-                    self.height_spin.setValue(
-                        height
-                    )
 
             elif record_type == "date_stamp" and hasattr(self, "size_spin"):
                 value = float(self.record.get("size", 72.0))
@@ -1514,7 +1344,6 @@ class AnnotationPropertiesPanel(QWidget):
             record["fill_color"] = self._color_name("fill_color", "#fff8c6")
             record["text_color"] = self._color_name("text_color", "#000000")
             record["line_width"] = self.line_width_spin.value()
-            record["corner_radius"] = self.corner_radius_spin.value()
             record["font_size"] = self.font_size_spin.value()
             record["width"] = self.width_spin.value()
             record["height"] = self.height_spin.value()
@@ -1525,106 +1354,6 @@ class AnnotationPropertiesPanel(QWidget):
                 item.update()
             view._refresh_selection_overlay()
             view._commit_history_change(before)
-
-            self.main_window._remember_annotation_defaults(
-                "callout",
-                {
-                    "color": record["color"],
-                    "arrow_color": record["arrow_color"],
-                    "fill_color": record["fill_color"],
-                    "text_color": record["text_color"],
-                    "line_width": record["line_width"],
-                    "corner_radius": record["corner_radius"],
-                    "font_size": record["font_size"],
-                    "width": record["width"],
-                    "height": record["height"],
-                    "fill_opacity": record["fill_opacity"],
-                },
-            )
-
-        elif record_type == "balloon":
-            before = view._history_snapshot()
-
-            record["text"] = (
-                self.text_edit.toPlainText().strip()
-                or "1"
-            )
-            record["color"] = self._color_name(
-                "balloon_border_color",
-                "#d00000",
-            )
-            record["fill_color"] = self._color_name(
-                "balloon_fill_color",
-                "#ffffff",
-            )
-            record["text_color"] = self._color_name(
-                "balloon_text_color",
-                "#d00000",
-            )
-            record["arrow_color"] = self._color_name(
-                "balloon_arrow_color",
-                record["color"],
-            )
-            record["arrow_enabled"] = (
-                self.arrow_enabled_check.isChecked()
-            )
-            record["width"] = (
-                self.width_spin.value()
-            )
-            record["height"] = (
-                self.height_spin.value()
-            )
-            record["font_size"] = (
-                self.font_size_spin.value()
-            )
-            record["line_width"] = (
-                self.line_width_spin.value()
-            )
-            record["fill_opacity"] = (
-                self.opacity_spin.value()
-                / 100.0
-            )
-
-            if hasattr(
-                item,
-                "refresh_from_record",
-            ):
-                item.refresh_from_record()
-            else:
-                item.update()
-
-            view._refresh_selection_overlay()
-            view._commit_history_change(before)
-
-            self.main_window._remember_annotation_defaults(
-                "balloon",
-                {
-                    "color": record["color"],
-                    "fill_color": (
-                        record["fill_color"]
-                    ),
-                    "text_color": (
-                        record["text_color"]
-                    ),
-                    "arrow_color": (
-                        record["arrow_color"]
-                    ),
-                    "arrow_enabled": (
-                        record["arrow_enabled"]
-                    ),
-                    "width": record["width"],
-                    "height": record["height"],
-                    "font_size": (
-                        record["font_size"]
-                    ),
-                    "line_width": (
-                        record["line_width"]
-                    ),
-                    "fill_opacity": (
-                        record["fill_opacity"]
-                    ),
-                },
-            )
 
         elif record_type == "date_stamp":
             before = view._history_snapshot()
@@ -3330,30 +3059,6 @@ class MainWindow(QMainWindow):
                 "fill_opacity": 0.25,
                 "fill_color": "#ffff00",
                 "font_size": 11.0,
-            },
-            "callout": {
-                "color": "#d00000",
-                "arrow_color": "#d00000",
-                "fill_color": "#fff8c6",
-                "text_color": "#000000",
-                "line_width": 2.0,
-                "corner_radius": 10.0,
-                "font_size": 11.0,
-                "fill_opacity": 0.72,
-                "width": 180.0,
-                "height": 74.0,
-            },
-            "balloon": {
-                "color": "#d00000",
-                "arrow_color": "#d00000",
-                "fill_color": "#ffffff",
-                "text_color": "#d00000",
-                "line_width": 2.0,
-                "font_size": 16.0,
-                "fill_opacity": 1.0,
-                "arrow_enabled": True,
-                "width": 52.0,
-                "height": 52.0,
             },
         }
 

@@ -606,25 +606,12 @@ class PDFDocument:
         line_width=2.0,
         opacity=1.0,
     ):
-        page = self.get_page(int(page_index))
-        if page is None:
-            return None
-
-        ink_points = []
-        for raw in points:
-            if not (
-                isinstance(raw, (list, tuple))
-                and len(raw) >= 2
-            ):
-                continue
-            display_x = float(x) + float(raw[0])
-            display_y = float(y) + float(raw[1])
-            point = self._display_point_to_pdf(
-                page,
-                display_x,
-                display_y,
-            )
-            ink_points.append(point)
+        page = self._document[int(page_index)]
+        ink_points = [
+            fitz.Point(float(x) + float(p[0]), float(y) + float(p[1]))
+            for p in points
+            if isinstance(p, (list, tuple)) and len(p) >= 2
+        ]
         if len(ink_points) < 2:
             return None
         rgb = self._parse_annotation_color(color, fallback=(0.86, 0.0, 0.0))

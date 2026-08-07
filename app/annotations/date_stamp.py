@@ -71,20 +71,33 @@ def draw_date_stamp(painter, rect, record):
     painter.restore()
 
 
-def render_date_stamp_png(record, scale=4.0):
+def render_date_stamp_image(record, scale=4.0):
     size_pt = max(float(record.get("size", 72.0)), 42.0)
-    pixels = max(int(round(size_pt * float(scale))), 1)
+    scale = max(float(scale), 1.0)
+    pixels = max(int(round(size_pt * scale)), 1)
     image = QImage(pixels, pixels, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
-    painter.scale(scale, scale)
-    margin = max(float(record.get("line_width", 1.5)), 0.5) / 2.0 + 0.75
-    rect = QRectF(margin, margin, size_pt - margin * 2, size_pt - margin * 2)
-    draw_date_stamp(painter, rect, record)
-    painter.end()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.scale(scale, scale)
+        margin = max(float(record.get("line_width", 1.5)), 0.5) / 2.0 + 0.75
+        rect = QRectF(margin, margin, size_pt-margin*2.0, size_pt-margin*2.0)
+        draw_date_stamp(painter, rect, record)
+    finally:
+        painter.end()
+    return image
 
-    data = QByteArray()
-    buffer = QBuffer(data)
-    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    image.save(buffer, "PNG")
+
+def render_date_stamp_png(record, scale=4.0):
+    image = render_date_stamp_image(record, scale=scale)
+    data=QByteArray(); buffer=QBuffer(data)
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        raise RuntimeError("could not open date stamp PNG buffer")
+    try:
+        if not image.save(buffer, "PNG"):
+            raise RuntimeError("could not encode date stamp PNG")
+    finally:
+        buffer.close()
     return bytes(data)
